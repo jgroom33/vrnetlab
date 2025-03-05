@@ -1,0 +1,17 @@
+name: saossonic-v1
+
+topology:
+  nodes:
+    sonic01:
+      kind: sonic-vm
+      image: vrnetlab/sonic_sonic-vs:202411
+    saos01:
+      kind: linux
+      image: vrnetlab/ciena_saos10.x:01-10-01-0182
+
+  links:
+    - endpoints: ["sonic01:eth1", "saos01:eth1"]
+    - endpoints: ["sonic01:eth2", "saos01:eth2"]
+    - endpoints: ["sonic01:eth3", "saos01:eth3"]
+    - endpoints: ["sonic01:eth4", "saos01:eth4"]
+
