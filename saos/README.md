@@ -6,7 +6,7 @@ This is the vrnetlab docker image for SAOS 10.x VM based simulator.
 
 ## Building the docker image
 
-Download a qcow2 backing file and place it in this directory.
+Download a qcow2 backing file and place it in this directory (internal location: https://artifactory.ciena.com/valimar-snapshot/backing_file/).  This file must be named meta_\<VERSION\>-core-x86-64-disk.qcow2 for the make logic to find the version to use with the docker image.
 
 Run `make`.
 
