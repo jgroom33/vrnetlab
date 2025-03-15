@@ -5,12 +5,9 @@ import logging
 import os
 import re
 import signal
-import subprocess
 import sys
-
 import vrnetlab
 
-# STARTUP_CONFIG_FILE = "/config/startup-config.cfg"
 
 def handle_SIGCHLD(_signal, _frame):
     os.waitpid(-1, os.WNOHANG)
@@ -38,31 +35,44 @@ logging.Logger.trace = trace
 
 
 class SAOS_vm(vrnetlab.VM):
-    def __init__(self, hostname, username, password, conn_mode):
+
+    variant_map = {
+        "5132": {
+            "interface_count" : 4
+        }
+    }
+
+    def __init__(self, hostname, username, password, conn_mode, variant):
         disk_image = "/"
         for e in os.listdir("/"):
             if re.search(".qcow2$", e):
                 disk_image = "/" + e
                 break
         super(SAOS_vm, self).__init__(
-            username, password, disk_image=disk_image, ram=6144, cpu="host", smp="2,sockets=1,cores=1,threads=2"
+            username, password, disk_image=disk_image, ram=8196, cpu="host", smp="2,sockets=1,cores=1,threads=2"
         )
+
+        self.hostname = hostname
+        self.variant = variant
+        self.variant_data = SAOS_vm.variant_map.get(variant)
+        if self.variant_data is None:
+            raise Exception("Unsupported variant")
 
         self.nic_type = "virtio-net-pci"
         self.conn_mode = conn_mode
-        self.num_nics = 10 #fix later
+        self.num_nics = self.variant_data["interface_count"]
         self.qemu_args.extend(
             [
-                "-name",  #fix hard code value later
-                "onxl4380-5132-1", 
+                "-name",
+                f"{self.hostname}", 
                 "-machine",
                 "smm=off",
                 "-boot",
                 "order=c",
                 "-drive",
-                "if=pflash,format=raw,readonly=on,file=/OVMF_CODE.fd", 
+                "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd", 
                 "-drive",
-                "if=pflash,format=raw,file=/OVMF_VARS.fd", 
+                "if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS.fd", 
                 "-uuid",
                 "6af6dbea-ac21-4fd0-a796-5313611f8147", #fix hard code value later
                 "-net",
@@ -72,8 +82,8 @@ class SAOS_vm(vrnetlab.VM):
             ]
         )
         self.smbios = [
-            "type=1,manufacturer=Ciena,product=CN5132,serial=SIM6af6dbea-ac21-4fd0-a796-5313611f8147",  #fix hard code value later
-            "type=11,value=hostname:9a910e64-5503-4070-857c-8b19836cb977,value=mgmtMac:0,value=vmname:onxl4380-5132-1,value=is-sim:true,value=locationId:0,value=jsonData:{\\\"variant\\\":\\\"CN5132\\\"}",  #fix hard code value later
+            f"type=1,manufacturer=Ciena,product=CN{self.variant},serial=SIM6af6dbea-ac21-4fd0-a796-5313611f8147",  #fix hard code value later
+            f"type=11,value=hostname:clab,value=mgmtMac:0,value=vmname:clab-{self.hostname},value=is-sim:true,value=locationId:0,value=jsonData:{{\\\"variant\\\":\\\"CN{self.variant}\\\"}}",  #fix hard code value later
         ]
         self.hostname = hostname
         
@@ -92,12 +102,13 @@ class SAOS_vm(vrnetlab.VM):
         if match:  # got a match!
             if ridx == 0:  # login
                 self.logger.debug("matched login prompt")
-                self.logger.debug("trying to log in with 'admin'")
-                self.wait_write("admin", wait=None)
+                self.logger.debug("trying to log in with 'diag'")
+                self.wait_write("diag", wait=None)
+                self.wait_write("ciena123", wait="Password:")
+                self.logger.debug("login complete")
 
-                # run main config!
-                # self.bootstrap_config()
-                # self.startup_config()
+                # run config commands
+                self.startup_config()
                 # close telnet connection
                 self.tn.close()
                 # startup time?
@@ -118,71 +129,22 @@ class SAOS_vm(vrnetlab.VM):
 
         return
 
-    def bootstrap_config(self):
-        """Do the actual bootstrap config"""
-        self.logger.info("applying bootstrap configuration")
-        self.wait_write("", None)
-        self.wait_write("enable", ">")
-        self.wait_write("configure")
-        self.wait_write(
-            "username %s secret 0 %s role network-admin"
-            % (self.username, self.password)
-        )
-
-        # configure mgmt interface
-        self.wait_write("interface Management 1")
-        self.wait_write("ip address 10.0.0.15/24")
-        self.wait_write("exit")
-        self.wait_write("ip route 0.0.0.0/0 10.0.0.2")
-        self.wait_write("management api http-commands")
-        self.wait_write("protocol unix-socket")
-        self.wait_write("no shutdown")
-        self.wait_write("exit")
-
-        # gnmic config
-        self.wait_write("management api gnmi")
-        self.wait_write("transport grpc default")
-        self.wait_write("no shutdown")
-        self.wait_write("exit")
-
-        # netconf config
-        self.wait_write("management api netconf")
-        self.wait_write("transport ssh default")
-        self.wait_write("exit")
-
-        self.wait_write(f"hostname {self.hostname}")
-
-        self.wait_write("exit")
-        self.wait_write("copy running-config startup-config")
-
     def startup_config(self):
-        """Load additional config provided by user."""
-
-        if not os.path.exists(STARTUP_CONFIG_FILE):
-            self.logger.trace(f"Startup config file {STARTUP_CONFIG_FILE} is not found")
-            return
-
-        self.logger.trace(f"Startup config file {STARTUP_CONFIG_FILE} exists")
-        with open(STARTUP_CONFIG_FILE) as file:
-            config_lines = file.readlines()
-            config_lines = [line.rstrip() for line in config_lines]
-            self.logger.trace(f"Parsed startup config file {STARTUP_CONFIG_FILE}")
-
-        self.logger.info(f"Writing lines from {STARTUP_CONFIG_FILE}")
-
-        self.wait_write("configure terminal")
-        # Apply lines from file
-        for line in config_lines:
-            self.wait_write(line)
-        # End and Save
-        self.wait_write("end")
-        self.wait_write("copy running-config startup-config")
+        """Provide initial node configuration"""
+        return
+        # FIXME: need to debug this logic
+        self.logger.info("applying configuration")
+        self.wait_write("config", wait=r'\S+>')
+        self.wait_write(f"system config hostname {self.hostname}", wait=r'\S+#')
+        self.wait_write("exit", wait=r'\S+#')
+        self.logger.info("applying configuration done")
 
 
 class SAOS(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
+        variant = "5132"  # FIXME: need to parameterize this
         super().__init__(username, password)
-        self.vms = [SAOS_vm(hostname, username, password, conn_mode)]
+        self.vms = [SAOS_vm(hostname, username, password, conn_mode, variant)]
 
 
 if __name__ == "__main__":
@@ -192,9 +154,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trace", action="store_true", help="enable trace level logging"
     )
-    parser.add_argument("--hostname", default="saos", help="SAOS hostname")
-    parser.add_argument("--username", default="admin", help="Username")
-    parser.add_argument("--password", default="admin", help="Password")
+    parser.add_argument("--hostname", help="hostname")
+    parser.add_argument("--username", default="diag", help="username (not used)")
+    parser.add_argument("--password", default="ciena123", help="password (not used)")
     parser.add_argument(
         "--connection-mode", default="tc", help="Connection mode to use in the datapath"
     )

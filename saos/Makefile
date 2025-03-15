@@ -1,13 +1,11 @@
-VENDOR=Ciena
-NAME=SAOS 10.x
-IMAGE_FORMAT=qcow
+VENDOR=ciena
+NAME=saos
 IMAGE_GLOB=*.qcow2
 IMAGE=meta_10-10-01-0182-core-x86-64-disk.qcow2
 
 # match versions like:
-# 202305
-# VERSION=$(shell echo $(IMAGE) | sed -e 's/sonic-vs-//' | sed -e 's/.qcow2//')
-VERSION="01-10-01-0182"
+# 10-10-01-0182
+VERSION=$(shell echo $(IMAGE) | sed -e 's/meta_//' | sed -e 's/-core-x86-64-disk.qcow2//')
 
 -include ../makefile-sanity.include
 -include ../makefile.include
