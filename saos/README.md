@@ -2,7 +2,7 @@
 
 This is the vrnetlab docker image for SAOS 10.x VM based simulator.
 
-> Available with [containerlab](https://containerlab.dev) as ['linux`](https://containerlab.dev/manual/kinds/linux/) kind.
+> Available with [containerlab](https://containerlab.dev) as ['linux'](https://containerlab.dev/manual/kinds/linux/) kind.
 
 ## Building the docker image
 
@@ -26,7 +26,9 @@ Initial confiuration application is not yet supported.
 
 ## Limitations
 
-The launch command is using a hard coded variant (5132).  Serial numbers are fixed.
+* The launch command is using a hard coded variant (5132).
+* Serial numbers are fixed.
+* The issue tracked by [PNVAL-227058](https://agile-jira.ciena.com/browse/PNVAL-227058) will apply.
 
 ## Contact
 
