@@ -8,6 +8,7 @@ topology:
     saos-vm-1:
       kind: linux
       image: vrnetlab/ciena_saos:10-10-01-0182
+      type: 5132
 
   links:
     - endpoints: ["sonic-vm-1:eth1", "saos-vm-1:eth1"]

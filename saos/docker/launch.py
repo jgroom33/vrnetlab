@@ -37,12 +37,69 @@ logging.Logger.trace = trace
 class SAOS_vm(vrnetlab.VM):
 
     variant_map = {
+        "3948": {
+            "interface_count"       : 16,
+        },
+        "3984": {
+            "interface_count"       : 6,
+        },
+        "3985": {
+            "interface_count"       : 6,
+        },
+        "5130": {
+            "interface_count"       : 14,
+        },
+        "5131": {
+            "interface_count"       : 14,
+        },
         "5132": {
-            "interface_count" : 4
-        }
+            "interface_count"       : 4,
+        },
+        "5134": {
+            "interface_count"       : 26,
+        },
+        "5144": {
+            "interface_count"       : 28,
+        },
+        "5162": {
+            "interface_count"       : 42,
+        },
+        "5164": {
+            "interface_count"       : 36,
+        },
+        "5166": {
+            "interface_count"       : 34,
+        },
+        "5168": {
+            "interface_count"       : 36,
+        },
+        "5170": {
+            "interface_count"       : 44,
+        },
+        "5171": {
+            "interface_count"       : 56,
+        },
+        "8110": {
+            "interface_count"       : 58,
+        },
+        "8112": {
+            "interface_count"       : 40,
+        },
+        "8114": {
+            "interface_count"       : 78,
+        },
+        "8140": {
+            "interface_count"       : 48, # no CPU ports
+        },
+        "8190": {
+            "interface_count"       : 36, # no CPU ports
+        },
+        "8192": {
+            "interface_count"       : 36, # no CPU ports
+        },
     }
 
-    def __init__(self, hostname, username, password, conn_mode, variant):
+    def __init__(self, hostname, username, password, conn_mode):
         disk_image = "/"
         for e in os.listdir("/"):
             if re.search(".qcow2$", e):
@@ -53,8 +110,16 @@ class SAOS_vm(vrnetlab.VM):
         )
 
         self.hostname = hostname
-        self.variant = variant
-        self.variant_data = SAOS_vm.variant_map.get(variant)
+        self.variant = os.environ.get("CLAB_LABEL_CLAB_NODE_TYPE")
+
+        self.logger.info(f"Supported variants are: {SAOS_vm.variant_map.keys()}")
+
+        if self.variant is None:
+            raise Exception("Missing saos variant in the yml file.")
+
+        self.logger.info(f"Variant: {self.variant}")
+        self.variant_data = SAOS_vm.variant_map.get(self.variant)
+
         if self.variant_data is None:
             raise Exception("Unsupported variant")
 
@@ -142,9 +207,8 @@ class SAOS_vm(vrnetlab.VM):
 
 class SAOS(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
-        variant = "5132"  # FIXME: need to parameterize this
         super().__init__(username, password)
-        self.vms = [SAOS_vm(hostname, username, password, conn_mode, variant)]
+        self.vms = [SAOS_vm(hostname, username, password, conn_mode)]
 
 
 if __name__ == "__main__":

@@ -14,6 +14,60 @@ After typing `make`, a new image will appear named `vrnetlab/ciena_saos:<version
 
 Run `docker images` to confirm this.
 
+## Variants
+
+You must specify the saos variant in the topology.
+
+- 3948
+- 3984
+- 3985
+- 5130
+- 5131
+- 5132
+- 5134
+- 5144
+- 5162
+- 5164
+- 5166
+- 5168
+- 5170
+- 5171
+- 8110
+- 8112
+- 8114
+- 8140
+- 8190
+- 8192
+
+## Usage
+
+You can define the image easily and use it in a topolgy.
+
+### Interface naming
+- `eth0` - Node management interface
+- `eth1` - First dataplane interface
+- `ethX` - Subsequent dataplane interfaces will count onwards from 1. For example, the third dataplane interface will be `eth3`
+
+### Example: Two or more nodes with links
+```yaml
+# topology.clab.yaml
+name: mylab
+topology:
+  nodes:
+    saos-1:
+      kind: linux
+      image: vrnetlab/vrnetlab/ciena_saos:<tag>
+      type: <variant>
+    saos-2:
+      kind: linux
+      image: vrnetlab/vrnetlab/ciena_saos:<tag>
+      type: <variant>
+
+  links:
+    - endpoints: ["saos-1:eth1", "saos-2:eth1"]
+    - endpoints: ["saos-1:eth2", "saos-2:eth2"]
+```
+
 ## System requirements
 
 - CPU: 2 cores
@@ -26,7 +80,6 @@ Initial confiuration application is not yet supported.
 
 ## Limitations
 
-* The launch command is using a hard coded variant (5132).
 * Serial numbers are fixed.
 * The issue tracked by [PNVAL-227058](https://agile-jira.ciena.com/browse/PNVAL-227058) will apply.
 
