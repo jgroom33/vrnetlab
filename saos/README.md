@@ -41,14 +41,19 @@ You must specify the saos variant in the topology.
 
 ## Usage
 
-You can define the image easily and use it in a topolgy.
+### Console access
+
+Serial console access is available via telnet on port 5000 of the container:
+```
+telnet <container-name> 5000
+```
 
 ### Interface naming
 - `eth0` - Node management interface
 - `eth1` - First dataplane interface
 - `ethX` - Subsequent dataplane interfaces will count onwards from 1. For example, the third dataplane interface will be `eth3`
 
-### Example: Two or more nodes with links
+### Example topology file
 ```yaml
 # topology.clab.yaml
 name: mylab
