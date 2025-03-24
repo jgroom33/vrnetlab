@@ -89,13 +89,13 @@ class SAOS_vm(vrnetlab.VM):
             "interface_count"       : 78,
         },
         "8140": {
-            "interface_count"       : 48, # no CPU ports
+            "interface_count"       : 48,  # no CPU ports
         },
         "8190": {
-            "interface_count"       : 36, # no CPU ports
+            "interface_count"       : 36,  # no CPU ports
         },
         "8192": {
-            "interface_count"       : 36, # no CPU ports
+            "interface_count"       : 36,  # no CPU ports
         },
     }
 
@@ -129,17 +129,17 @@ class SAOS_vm(vrnetlab.VM):
         self.qemu_args.extend(
             [
                 "-name",
-                f"{self.hostname}", 
+                f"{self.hostname}",
                 "-machine",
                 "smm=off",
                 "-boot",
                 "order=c",
                 "-drive",
-                "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd", 
+                "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd",
                 "-drive",
-                "if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS.fd", 
+                "if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS.fd",
                 "-uuid",
-                "6af6dbea-ac21-4fd0-a796-5313611f8147", #fix hard code value later
+                "6af6dbea-ac21-4fd0-a796-5313611f8147",  # fix hard code value later
                 "-net",
                 "none",
                 "-machine",
@@ -147,11 +147,10 @@ class SAOS_vm(vrnetlab.VM):
             ]
         )
         self.smbios = [
-            f"type=1,manufacturer=Ciena,product=CN{self.variant},serial=SIM6af6dbea-ac21-4fd0-a796-5313611f8147",  #fix hard code value later
-            f"type=11,value=hostname:clab,value=mgmtMac:0,value=vmname:clab-{self.hostname},value=is-sim:true,value=locationId:0,value=jsonData:{{\\\"variant\\\":\\\"CN{self.variant}\\\"}}",  #fix hard code value later
+            f"type=1,manufacturer=Ciena,product=CN{self.variant},serial=SIM6af6dbea-ac21-4fd0-a796-5313611f8147",  # fix hard code value later
+            f"type=11,value=hostname:clab,value=mgmtMac:0,value=vmname:clab-{self.hostname},value=is-sim:true,value=locationId:0,value=jsonData:{{\\\"variant\\\":\\\"CN{self.variant}\\\"}}",  # fix hard code value later
         ]
         self.hostname = hostname
-        
 
     def bootstrap_spin(self):
         """This function should be called periodically to do work."""
