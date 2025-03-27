@@ -7,4 +7,4 @@ COPY $IMAGE* /
 # copy python scripts for launching VM
 COPY *.py /
 
-EXPOSE 22 830
+EXPOSE 22 179 225 443 830 9339

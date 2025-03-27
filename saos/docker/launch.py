@@ -7,6 +7,8 @@ import re
 import signal
 import sys
 import vrnetlab
+import uuid
+import socket
 
 
 def handle_SIGCHLD(_signal, _frame):
@@ -105,50 +107,57 @@ class SAOS_vm(vrnetlab.VM):
             if re.search(".qcow2$", e):
                 disk_image = "/" + e
                 break
-        super(SAOS_vm, self).__init__(
-            username, password, disk_image=disk_image, ram=8196, cpu="host", smp="2,sockets=1,cores=1,threads=2"
-        )
 
-        self.hostname = hostname
         self.variant = os.environ.get("CLAB_LABEL_CLAB_NODE_TYPE")
-
-        self.logger.info(f"Supported variants are: {SAOS_vm.variant_map.keys()}")
 
         if self.variant is None:
             raise Exception("Missing saos variant in the yml file.")
 
-        self.logger.info(f"Variant: {self.variant}")
         self.variant_data = SAOS_vm.variant_map.get(self.variant)
-
         if self.variant_data is None:
-            raise Exception("Unsupported variant")
+            raise Exception(f"Unsupported variant: {self.variant}")
+
+        # NOTE: Can not use logger until superclass constructor is complete
+        super(SAOS_vm, self).__init__(
+            username, password, disk_image=disk_image, ram=8196, cpu="host", smp="2,sockets=1,cores=1,threads=2",
+        )
+
+        self.logger.info(f"Variant: {self.variant}")
+
+        # 179 - BGP
+        # 225 - debug shell
+        self.mgmt_tcp_ports.extend([179, 225])
+
+        self.hostname = hostname
+
+        self.uuid = str(uuid.uuid4())
+        self.serial_number = f"SIM{self.uuid}"[0:8]  # create an 8 character serial number
 
         self.nic_type = "virtio-net-pci"
         self.conn_mode = conn_mode
         self.num_nics = self.variant_data["interface_count"]
+
         self.qemu_args.extend(
             [
                 "-name",
                 f"{self.hostname}",
                 "-machine",
-                "smm=off",
+                "q35,accel=kvm,dump-guest-core=off,smm=off",
                 "-boot",
                 "order=c",
-                "-drive",
-                "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd",
-                "-drive",
-                "if=pflash,format=raw,file=/usr/share/OVMF/OVMF_VARS.fd",
+                "-bios",
+                "/usr/share/OVMF/OVMF_CODE.fd",
                 "-uuid",
-                "6af6dbea-ac21-4fd0-a796-5313611f8147",  # fix hard code value later
+                f"{self.uuid}",
                 "-net",
                 "none",
-                "-machine",
-                "q35,accel=kvm,dump-guest-core=off",
             ]
         )
         self.smbios = [
-            f"type=1,manufacturer=Ciena,product=CN{self.variant},serial=SIM6af6dbea-ac21-4fd0-a796-5313611f8147",  # fix hard code value later
-            f"type=11,value=hostname:clab,value=mgmtMac:0,value=vmname:clab-{self.hostname},value=is-sim:true,value=locationId:0,value=jsonData:{{\\\"variant\\\":\\\"CN{self.variant}\\\"}}",  # fix hard code value later
+            f"type=1,manufacturer=Ciena,product=CN{self.variant},serial={self.serial_number}",
+            f"type=2,manufacturer=Ciena,product=CN{self.variant}",
+            f"type=11,value=hostname:clab,value=mgmtMac:0,value=vmname:clab-{self.hostname}," +
+            f"value=is-sim:true,value=locationId:0,value=jsonData:{{\\\"variant\\\":\\\"CN{self.variant}\\\"}}",
         ]
         self.hostname = hostname
 
@@ -217,7 +226,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trace", action="store_true", help="enable trace level logging"
     )
-    parser.add_argument("--hostname", help="hostname")
+    parser.add_argument("--hostname", default=socket.gethostname(), help="hostname")
     parser.add_argument("--username", default="diag", help="username (not used)")
     parser.add_argument("--password", default="ciena123", help="password (not used)")
     parser.add_argument(
