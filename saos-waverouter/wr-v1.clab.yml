@@ -1,0 +1,8 @@
+name: wr-test
+
+topology:
+  nodes:
+    wr-ctm-1:
+      kind: linux
+      image: vrnetlab/ciena_wr-ctm:wr-10-09-02-0572
+      type: wr-ctm
