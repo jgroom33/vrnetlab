@@ -10,6 +10,9 @@ import vrnetlab
 import uuid
 import socket
 
+OVMF_VARS = "/backup/OVMF_VARS_bkup.fd.gz"
+WR1_CTM_AP = "/WR1-CTM_ap.img.tar" #change variable name later
+
 
 def handle_SIGCHLD(_signal, _frame):
     os.waitpid(-1, os.WNOHANG)
@@ -31,6 +34,13 @@ def trace(self, message, *args, **kws):
     # Yes, logger takes its '*args' as 'args'.
     if self.isEnabledFor(TRACE_LEVEL_NUM):
         self._log(TRACE_LEVEL_NUM, message, args, **kws)
+
+
+def gen_shared_mac(second_last_octet, last_octet):
+    return "52:54:01:07:%02x:%02x" % (
+        second_last_octet,
+        last_octet,
+)
 
 
 logging.Logger.trace = trace
@@ -71,7 +81,7 @@ class WR_vm(vrnetlab.VM):
 
         # NOTE: Can not use logger until superclass constructor is complete
         super(WR_vm, self).__init__(
-            username, password, disk_image=disk_image, ram=10240, cpu="host", smp="4,sockets=1,cores=2,threads=2",
+            username, password, disk_image=disk_image, ram=10240, cpu="host", smp="4,sockets=1,dies=1,cores=2,threads=2",
         )
 
         self.logger.info(f"Variant: {self.variant}")
@@ -87,18 +97,45 @@ class WR_vm(vrnetlab.VM):
 
         self.nic_type = "virtio-net-pci"
         self.conn_mode = conn_mode
-        self.num_nics = self.variant_data["interface_count"]
+        self.num_nics = 0
+
+        self.logger.debug("Unzip OVMF_VARS_bkup.fd.gz...")
+        if not os.path.exists(OVMF_VARS):
+            raise Exception(f"File {OVMF_VARS} not found")
+        vrnetlab.run_command(["gunzip", "/backup/OVMF_VARS_bkup.fd.gz"])
+
+        self.logger.debug("Making copy of OVMF_VARS...")
+        vrnetlab.run_command(["cp", "/backup/OVMF_VARS_bkup.fd", "/OVMF_VARS.fd"])
+
+        self.logger.debug("Extracting WR1_CTM_AP...")
+        if not os.path.exists(WR1_CTM_AP):
+            raise Exception(f"File {WR1_CTM_AP} not found")
+        vrnetlab.run_command(["tar", "xSf", WR1_CTM_AP])
+
+        self.provision_pci_bus = False #to stop setting up PCI buses
 
         self.qemu_args.extend(
             [
                 "-name",
                 f"{self.hostname}",
                 "-machine",
-                "q35,accel=kvm,dump-guest-core=off,smm=off",
+                "q35,accel=kvm,dump-guest-core=off,smm=off,usb=off,memory-backend=pc.ram",
                 "-boot",
-                "order=c",
-                "-bios",
-                "/OVMF_CODE-pure-efi.fd",
+                "strict=on",
+                "-object",
+                "qom-type=memory-backend-ram,id=pc.ram,size=10737418240",
+                "-device",
+                "pcie-root-port,port=40,chassis=1,id=pci.1,bus=pcie.0,multifunction=on,addr=0x5",
+                "-device",
+                "pcie-root-port,port=41,chassis=2,id=pci.2,bus=pcie.0,addr=0x5.0x1",
+                "-drive",
+                "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd",
+                "-drive",
+                "if=pflash,format=raw,file=/OVMF_VARS.fd",
+                "-drive",
+                "if=none,file=/WR1-CTM_ap.img,format=raw,id=disk2",
+                "-device",
+                "ide-hd,bus=ide.1,drive=disk2,id=sata0-0-1",
                 "-net",
                 "none",
             ]
@@ -110,6 +147,44 @@ class WR_vm(vrnetlab.VM):
             f"value=is-sim:true,value=locationId:7,value=jsonData:{{\"variant\":\"{self.variant}\"}},value=is-dual-ctm:no", #fix hard coded value later
         ]
         self.hostname = hostname
+
+
+    def gen_mgmt(self):
+        """Generate mgmt interface(s)
+
+        We override the default function for the wr-ctm
+        """
+        res = super(WR_vm, self).gen_mgmt()
+        if_name = "ctm17bp" #fix this later
+
+        replace_index = res.index("virtio-net-pci,netdev=p00,mac=%s" % self.mgmt_mac)
+        res[replace_index] += ",multifunction=on,addr=0x3"
+
+        # add virtio NIC for internal control plane interface to wr-ctm
+        res.append("-device")
+        res.append("virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,addr=0x3.0x1" % ((if_name+"0", self.mgmt_mac[:-1] + "1")))
+        res.append("-netdev")
+        res.append("tap,ifname=%s,id=%s,script=no,downscript=no" % (if_name+"0", if_name+"0"))
+        res.append("-device")
+        res.append("virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,multifunction=on,addr=0x4" % (if_name+"1", gen_shared_mac(2, 0)))
+        res.append("-netdev")
+        res.append("tap,ifname=%s,id=%s,script=no,downscript=no" % (if_name+"1", if_name+"1"))
+
+        for x in range(1, 5):
+            if_name = if_name+str(x+1)
+            res.append("-device")
+            res.append("virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,addr=0x4.0x%s" % (if_name, gen_shared_mac(x+2, x), x))
+            res.append("-netdev")
+            res.append("tap,ifname=%s,id=%s,script=no,downscript=no" % (if_name, if_name))
+
+        # might not need this - can be removed later
+        res.append("-object")
+        res.append("qom-type=rng-random,id=objrng0,filename=/dev/urandom")
+        res.append("-device")
+        res.append("virtio-rng-pci,rng=objrng0,id=rng0,bus=pci.1,addr=0x0")
+
+        return res
+
 
     def bootstrap_spin(self):
         """This function should be called periodically to do work."""

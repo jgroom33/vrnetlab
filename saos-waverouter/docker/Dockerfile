@@ -7,7 +7,8 @@ COPY $IMAGE* /
 # copy python scripts for launching VM
 COPY *.py /
 
-#copy OVMF_CODE-pure-efi.fd for now, need this file inside docker folder before running make
-COPY *.fd /
+#need these files inside docker folder before running make
+COPY OVMF_VARS_bkup.fd.gz /backup/
+COPY WR1-CTM_ap.img.tar /
 
 EXPOSE 22 179 225 443 830 9339
