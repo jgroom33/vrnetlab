@@ -10,5 +10,6 @@ COPY *.py /
 #need these files inside docker folder before running make
 COPY OVMF_VARS_bkup.fd.gz /backup/
 COPY WR1-CTM_ap.img.tar /
+COPY qbox-disk/WR1-QBox-1-5-disk.qcow2 /qbox-disk/
 
 EXPOSE 22 179 225 443 830 9339

@@ -1,5 +1,5 @@
 VENDOR=ciena
-NAME=wr-ctm
+NAME=waverouter
 IMAGE_GLOB=*.qcow2
 IMAGE=WR1-CTM.qcow2
 

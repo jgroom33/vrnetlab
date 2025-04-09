@@ -1,8 +1,7 @@
-name: wr-test
+name: wr-test1
 
 topology:
   nodes:
-    wr-ctm-1:
+    wr-1:
       kind: linux
-      image: vrnetlab/ciena_wr-ctm:wr-10-09-02-0572
-      type: wr-ctm
+      image: vrnetlab/ciena_waverouter:wr-10-09-02-0572
