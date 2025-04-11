@@ -9,18 +9,6 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 - Need a <wr-name>.qcow2
     - Start a WR-CTM with --no-start (using the simulator script)
     - Convert the <wr-name>-disk.img file into qcow2 (`qemu-img convert -f raw -O qcow2 <wr-name>-disk.img <wr-name>-disk.qcow2`)
-- Need a <wr-name>-disk_ap.img.tar inside docker/
-    - NOTES: For now make sure before tar and after untar the file is named WR1-CTM_ap.img
-    - Start a WR-CTM with --no-start
-    - Rename the <wr-name>-disk_ap.img to WR1-CTM_ap.img (Need to fix this hard coded naming)
-    - Tar the WR1-CTM_ap.img (`tar cSf WR1-CTM_ap.img.tar WR1-CTM_ap.img`)
-- Need OVMF_VARS_bkup.fd.gz inside docker/
-- Need qbox-disk/WR1-QBox-1-5-disk.qcow2 inside docker/
-    - cd to docker/
-    - mkdir qbox-disk/
-    - Start a WR-QB with --no-start (HOUSING_ID=1, LOCATION_ID=5)
-    - Convert the <wr-name>-disk.img file into qcow2 (`qemu-img convert -f raw -O qcow2 <wr-name>-disk.img <wr-name>-disk.qcow2`)
-    - mv the qcow2 into docker/qbox-disk/
 
 Run `make`.
 
