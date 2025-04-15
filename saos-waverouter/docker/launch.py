@@ -131,8 +131,13 @@ class WR_base(vrnetlab.VM):
                 "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd",
                 "-drive",
                 f"if=pflash,format=raw,file=/OVMF_VARS_{num}.fd",
-                "-net", 
+                "-net",
                 "none",
+                # might not need this - can be removed later
+                "-object",
+                "qom-type=rng-random,id=objrng0,filename=/dev/urandom",
+                "-device",
+                "virtio-rng-pci,rng=objrng0,id=rng0,bus=pci.1,addr=0x0",
             ]
         )
         self.smbios = [
@@ -160,7 +165,7 @@ class WR_base(vrnetlab.VM):
     def bootstrap_spin(self):
         """This function should be called periodically to do work."""
 
-        if self.spins > 300:
+        if self.spins > 1000:
             # too many spins with no result ->  give up
             self.logger.info("To many spins with no result, restarting")
             self.stop()
@@ -277,12 +282,6 @@ class WR_ctm(WR_base):
                         "-netdev",
                         "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.if_list[i], self.if_list[i])])
 
-        # might not need this - can be removed later
-        res.extend(["-object",
-                    "qom-type=rng-random,id=objrng0,filename=/dev/urandom",
-                    "-device",
-                    "virtio-rng-pci,rng=objrng0,id=rng0,bus=pci.1,addr=0x0"])
-
         return res
 
 
@@ -310,6 +309,7 @@ class WR_qb(WR_base):
             num_nics=15,
             smp="4,sockets=1,dies=1,cores=2,threads=2"
         )
+        self.mgmt_mac = vrnetlab.gen_mac(0)
 
     def gen_mgmt(self):
         """Generate mgmt interface(s)
@@ -320,7 +320,7 @@ class WR_qb(WR_base):
 
         # debug interface
         res.extend(["-device",
-                    "virtio-net-pci,netdev=p00,mac=%s,multifunction=on,addr=0x3" % vrnetlab.gen_mac(0),
+                    "virtio-net-pci,netdev=p00,mac=%s,multifunction=on,addr=0x3" % self.mgmt_mac,
                     "-netdev",
                     "user,id=p00,net=10.0.0.0/24,host=10.0.0.2,dns=10.0.0.3,dhcpstart=10.0.0.%02x" % (21 + self.num)])
 
@@ -338,11 +338,47 @@ class WR_qb(WR_base):
                         "-netdev",
                         "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.if_list[i], self.if_list[i])])
 
-        # might not need this - can be removed later
-        res.extend(["-object",
-                    "qom-type=rng-random,id=objrng0,filename=/dev/urandom",
-                    "-device",
-                    "virtio-rng-pci,rng=objrng0,id=rng0,bus=pci.1,addr=0x0"])
+        return res
+
+    def gen_nics(self):
+        """Generate qemu args for the normal traffic carrying interface(s)"""
+        self.nic_provision_delay()
+
+        res = []
+
+        if self.conn_mode == "tc":
+            self.create_tc_tap_ifup()
+
+        start_eth = self.start_nic_eth_idx
+        end_eth = self.start_nic_eth_idx + self.num_nics
+        addr = 0x8
+        ext = 0x0
+        for i in range(start_eth, end_eth):
+
+            if ext == 0:
+                mf = "multifunction=on,"
+                ext_str = ""
+            else:
+                mf = ""
+                ext_str = f".0x{ext}"
+
+            mac = f"{self.mgmt_mac[:-2]}{(i+0x10):02x}"
+
+            res.extend([
+                "-device",
+                f"{self.nic_type},netdev=p{i:02d},mac={mac},bus=pcie.0,{mf}addr=0x{addr:02x}{ext_str}"
+            ])
+
+            # if the matching container interface ethX doesn't exist, create a dummy interface
+            if not os.path.exists(f"/sys/class/net/eth{i}"):
+                res.extend(["-netdev", f"socket,id=p{i:02d},listen=:{i + 10000}"])
+            else:
+                res.extend(["-netdev", f"tap,id=p{i:02d},ifname=tap{i},script=/etc/tc-tap-ifup,downscript=no"])
+
+            # increment bus addressing
+            ext = (ext + 1) % 8
+            if ext == 0:
+                addr += 1
 
         return res
 
