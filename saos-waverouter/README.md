@@ -7,12 +7,12 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 ## Building the docker image
 
 - Need a <wr-name>.qcow2
-    - Start a WR-CTM with --no-start (using the simulator script)
+    - Start a WR-CTM with --no-start (using the simulator script, eg `sudo -E BRIDGE=virbr0 VM_NAME=WR1-CTM-1-7 NODE_NAME=WR1 HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BOXLANBRIDGE=virbrWR1 IS_DUAL_CTM=no OFLD_SLOTS=0 ./wr_ctm_sim.sh --version wr-10-09-02-0579 --wr-type wr13 --debug --ubridge --no-start`)
     - Convert the <wr-name>-disk.img file into qcow2 (`qemu-img convert -f raw -O qcow2 <wr-name>-disk.img <wr-name>-disk.qcow2`)
 
-Run `make`.
+Run `make VERSION=<version>`. (eg VERSION=wr-10-09-02-0579)
 
-After typing `make`, a new image will appear named `vrnetlab/ciena_waverouter:<version>`.
+After typing `make VERSION=<version>`, a new image will appear named `vrnetlab/ciena_waverouter:<version>`.
 
 Run `docker images` to confirm this.
 
