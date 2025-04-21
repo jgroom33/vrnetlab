@@ -9,6 +9,7 @@ import sys
 import vrnetlab
 import uuid
 import socket
+import json
 
 OVMF_VARS_gz = "/backup/OVMF_VARS_bkup.fd.gz"
 OVMF_VARS = "/backup/OVMF_VARS_bkup.fd"
@@ -387,27 +388,69 @@ class WR_qb(WR_base):
 
 class WR(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
-        print(f"Unzip {OVMF_VARS_gz}...")
+        super().__init__(username, password)
+
+        setup_json = "/setup.json"
+        if not os.path.exists(setup_json):
+            raise Exception(f"Json file {setup_json} not found")
+        self.logger.debug(f"Json file {setup_json} exists")
+
+        with open(setup_json) as file:
+            vm_info = json.load(file)
+
+        self.logger.debug(f"Unzip {OVMF_VARS_gz}...")
         if not os.path.exists(OVMF_VARS_gz):
             raise Exception(f"File {OVMF_VARS_gz} not found")
         vrnetlab.run_command(["gunzip", OVMF_VARS_gz])
 
-        print(f"Unzip {CTM_AP_gz} ...")
+        self.logger.debug(f"Unzip {CTM_AP_gz} ...")
         if not os.path.exists(CTM_AP_gz):
             raise Exception(f"File {CTM_AP_gz} not found")
         vrnetlab.run_command(["gunzip", CTM_AP_gz])
 
-        print(f"Extracting {CTM_AP}...")
+        self.logger.debug(f"Extracting {CTM_AP}...")
         if not os.path.exists(CTM_AP):
             raise Exception(f"File {CTM_AP} not found")
         vrnetlab.run_command(["tar", "xSf", CTM_AP])
 
-        super().__init__(username, password)
-        self.vms = [
-            # num, housing_id, location_id, hard code for now
-            WR_ctm(hostname, username, password, conn_mode, 0, "1", "7"),
-            WR_qb(hostname, username, password, conn_mode, 1, "1", "5")
-        ]
+        self.vms = []
+
+        # add more later
+        vm_class = {
+            "wr-ctm": WR_ctm,
+            "wr-qbox": WR_qb,
+        }
+
+        self.logger.debug(f"Number of nodes: {len(vm_info)}")
+        if len(vm_info) > 1:
+            raise Exception(f"{setup_json} is invalid. Maximum number of node is 1")
+
+        num = 0
+        for wr in vm_info:
+            self.logger.info(f"WR: {wr}")
+            node_dict = vm_info[wr]
+
+            for housing_id in node_dict:
+                housing_dict = node_dict[housing_id]
+                housing_type = housing_dict.get("type", "wr13")
+
+                for location_id in housing_dict:
+                    if location_id == 'type':
+                        continue
+
+                    box_type = housing_dict[location_id]['type']
+                    self.logger.info(f"housing: {housing_id}, housing type: {housing_type}, location: {location_id}, box_type: {box_type}")
+
+                    self.vms.append(vm_class[box_type](
+                        hostname,
+                        username,
+                        password,
+                        conn_mode,
+                        num,
+                        housing_id,
+                        location_id
+                        ))
+                    num += 1
 
         # set up bridge to connect vms
         self.logger.debug("Creating linux bridge...")

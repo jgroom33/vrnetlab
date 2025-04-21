@@ -1,7 +1,9 @@
-name: wr-test1
+name: wr-test
 
 topology:
   nodes:
     wr-1:
       kind: linux
-      image: vrnetlab/ciena_waverouter:wr-10-09-02-0572
+      image: vrnetlab/ciena_waverouter:wr-10-09-02-0579
+      binds:
+        - ./1-1c1q.json:/setup.json
