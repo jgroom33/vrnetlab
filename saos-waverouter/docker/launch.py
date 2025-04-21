@@ -241,11 +241,10 @@ class WR_ctm(WR_base):
 
         # 179 - BGP
         # 225 - debug shell
-        # 8080 - web proxy
         # 9340 - gRIBI
         # 9559 - P4RT
         # 10161 - gNMI/gNOI alternate
-        self.mgmt_tcp_ports.extend([179, 225, 8080, 9340, 9559, 10161])
+        self.mgmt_tcp_ports.extend([179, 225, 9340, 9559, 10161])
         self.qemu_args.extend(
             [
                 "-drive",
