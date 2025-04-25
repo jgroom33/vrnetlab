@@ -4,6 +4,8 @@ topology:
   nodes:
     wr-1:
       kind: linux
-      image: vrnetlab/ciena_waverouter:wr-10-09-02-0579
+      image: vrnetlab/ciena_waverouter:wr-80-00-00-0081
       binds:
-        - ./1-1c1q.json:/setup.json
+        - ./1-2c1q.json:/setup.json
+  links:
+    - endpoints: ["wr-1:eth1", "wr-1:eth2"]

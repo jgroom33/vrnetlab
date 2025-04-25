@@ -7,7 +7,7 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 ## Building the docker image
 
 - Need a <wr-name>.qcow2
-    - Start a WR-CTM with --no-start (using the simulator script, eg `sudo -E BRIDGE=virbr0 VM_NAME=WR1-CTM-1-7 NODE_NAME=WR1 HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BOXLANBRIDGE=virbrWR1 IS_DUAL_CTM=no OFLD_SLOTS=0 ./wr_ctm_sim.sh --version wr-10-09-02-0579 --wr-type wr13 --debug --ubridge --no-start`)
+    - Start a WR-CTM with --no-start (using the simulator script, eg `sudo -E BRIDGE=virbr0 VM_NAME=WR1-CTM-1-7 NODE_NAME=WR1 HOUSING_ID=1 HOUSING_POOL=2 LOCATION_ID=7 BOXLANBRIDGE=virbrWR1 IS_DUAL_CTM=no OFLD_SLOTS=0 ./wr_ctm_sim.sh --version wr-80-00-00-0081 --wr-type wr13 --debug --ubridge --no-start`)
     - Convert the <wr-name>-disk.img file into qcow2 (`qemu-img convert -f raw -O qcow2 <wr-name>-disk.img <wr-name>-disk.qcow2`)
 - Edit the json file
     - Edit the provided example json file to define the waverouter node (Format: similar to the json files in /setup_files folder in the waverouter-simulation repo minus the `"Devices": {}`)
@@ -30,7 +30,7 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 ```
 
 
-Run `make VERSION=<version>`. (eg VERSION=wr-10-09-02-0579)
+Run `make VERSION=<version>`. (eg VERSION=wr-80-00-00-0081)
 
 After typing `make VERSION=<version>`, a new image will appear named `vrnetlab/ciena_waverouter:<version>`.
 
@@ -55,7 +55,7 @@ topology:
   nodes:
     wr-1:
       kind: linux
-      image: vrnetlab/ciena_waverouter:wr-10-09-02-0572
+      image: vrnetlab/ciena_waverouter:wr-80-00-00-0081
       binds:
         - ./<name>.json:/setup.json
 
@@ -70,11 +70,6 @@ topology:
 ## Configuration
 
 Initial confiuration application is not yet supported.
-
-## Limitations
-
-* Serial numbers are fixed.
-* Setup json file is limited to housing 1 with 1 ctm and 1 qbox
 
 ## Contact
 
