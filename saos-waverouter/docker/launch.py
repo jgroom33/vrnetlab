@@ -373,7 +373,7 @@ class WR_ctm(WR_base):
 
 
 class WR_qb(WR_base):
-    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id):
+    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id, nic_eth_start):
         # NOTE: Can not use logger until superclass constructor is complete
         super(WR_qb, self).__init__(
             hostname=hostname,
@@ -391,6 +391,7 @@ class WR_qb(WR_base):
             num_nics=15,
             smp="4,sockets=1,dies=1,cores=2,threads=2"
         )
+        self.start_nic_eth_idx = nic_eth_start
 
     def gen_mgmt(self):
         """Generate mgmt interface(s)
@@ -511,6 +512,8 @@ class WR(vrnetlab.VR):
                 HOUSING_POOL_MAX = max(HOUSING_POOL_MAX, housing_id)
 
         num = 0
+        start_eth = 1
+
         for wr in vm_info:
             self.logger.info(f"WR: {wr}")
             node_dict = vm_info[wr]
@@ -527,7 +530,7 @@ class WR(vrnetlab.VR):
                     self.logger.info(f"----------------VM{num} INFO-----------------")
                     self.logger.info(f"housing: {housing_id}, housing type: {housing_type}, location: {location_id}, box_type: {box_type}")
 
-                    self.vms.append(vm_class[box_type](
+                    args = [
                         hostname,
                         username,
                         password,
@@ -535,7 +538,16 @@ class WR(vrnetlab.VR):
                         num,
                         housing_id,
                         location_id
-                        ))
+                    ]
+
+                    if box_type == "wr-qbox":
+                        args.append(start_eth)
+                        vm = vm_class[box_type](*args)
+                        start_eth += vm.num_nics
+                    else:
+                        vm = vm_class[box_type](*args)
+
+                    self.vms.append(vm)
                     num += 1
 
         # set up bridge to connect vms
