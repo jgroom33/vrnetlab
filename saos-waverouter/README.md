@@ -7,7 +7,7 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 ## Building the docker image
 
 - Need a <wr-name>.qcow2
-    - Start a WR-CTM with --no-start (using the simulator script, eg `sudo -E BRIDGE=virbr0 VM_NAME=WR1-CTM-1-7 NODE_NAME=WR1 HOUSING_ID=1 HOUSING_POOL=2 LOCATION_ID=7 BOXLANBRIDGE=virbrWR1 IS_DUAL_CTM=no OFLD_SLOTS=0 ./wr_ctm_sim.sh --version wr-80-00-00-0081 --wr-type wr13 --debug --ubridge --no-start`)
+    - Start a WR-CTM with --no-reboot (using the simulator script, eg `sudo -E BRIDGE=virbr0 VM_NAME=WR1-CTM-1-7 NODE_NAME=WR1 HOUSING_ID=1 HOUSING_POOL=2 LOCATION_ID=7 BOXLANBRIDGE=virbrWR1 IS_DUAL_CTM=no OFLD_SLOTS=0 ./wr_ctm_sim.sh --version wr-80-00-00-0081 --wr-type wr13 --debug --ubridge --no-reboot`)
     - Convert the <wr-name>-disk.img file into qcow2 (`qemu-img convert -f raw -O qcow2 <wr-name>-disk.img <wr-name>-disk.qcow2`)
 - Edit the json file
     - Edit the provided example json file to define the waverouter node (Format: similar to the json files in /setup_files folder in the waverouter-simulation repo minus the `"Devices": {}`)
