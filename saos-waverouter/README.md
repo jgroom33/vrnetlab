@@ -6,15 +6,28 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 
 ## Building the docker image
 
-- Need a <wr-name>.qcow2
-    - Start a WR-CTM with --no-reboot (using the simulator script, eg `sudo -E BRIDGE=virbr0 VM_NAME=WR1-CTM-1-7 NODE_NAME=WR1 HOUSING_ID=1 HOUSING_POOL=2 LOCATION_ID=7 BOXLANBRIDGE=virbrWR1 IS_DUAL_CTM=no OFLD_SLOTS=0 ./wr_ctm_sim.sh --version wr-80-00-00-0081 --wr-type wr13 --debug --ubridge --no-reboot`)
-    - Convert the <wr-name>-disk.img file into qcow2 (`qemu-img convert -f raw -O qcow2 <wr-name>-disk.img <wr-name>-disk.qcow2`)
-- Edit the json file
-    - Edit the provided example json file to define the waverouter node (Format: similar to the json files in /setup_files folder in the waverouter-simulation repo minus the `"Devices": {}`)
+Generate a disk image:
+  - Launch a WR simulator using the --no-reboot option:<br>
+    `sudo -E VM_NAME=WR-BLOB NODE_NAME=WR_NOPE HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BOXLANBRIDGE=virbr0 ./wr_ctm_sim.sh --version wr-80-00-00-0124 --debug --no-reboot`<br>
+    Note that an up to date checkout of the [sim_scripts](https://bitbucket.ciena.com/projects/EVERNIGHT/repos/sim_scripts/browse) repo is required to use the --no-reboot option.
+  - Convert the raw disk image file into qcow2:<br>
+    `qemu-img convert -f raw -O qcow2 WR-BLOB-disk.img WR-BLOB-disk.qcow2`
 
-### Example json file
+Copy the qcow2 disk image into this directory.
+
+Run `make VERSION=<version>`. (eg VERSION=wr-80-00-00-0124)
+
+After typing `make VERSION=<version>`, a new image will appear named `vrnetlab/ciena_waverouter:<version>`.
+
+Run `docker images` to confirm this.
+
+## Usage
+
+### Waverouter system components
+A JSON file is used to define the Waverouter components in the simulator.  This file must be referenced in the "binds" section of the containerlab YAML file.  This file uses a format similar to the json files in /setup_files folder in the waverouter-simulation repo, but without the `"Devices": {}` delimiter.
+
+#### Example json file
 ```json
-# 1-1c1q.json
 {  
     "WR1": {
         "1": {
@@ -29,47 +42,37 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 }
 ```
 
-
-Run `make VERSION=<version>`. (eg VERSION=wr-80-00-00-0081)
-
-After typing `make VERSION=<version>`, a new image will appear named `vrnetlab/ciena_waverouter:<version>`.
-
-Run `docker images` to confirm this.
-
-## Usage
+### Example topology file
+```yaml
+name: mylab
+topology:
+  nodes:
+    wr-1:
+      kind: linux
+      image: vrnetlab/ciena_waverouter:wr-80-00-00-0124
+      binds:
+        - ./<name>.json:/setup.json
+```
 
 ### Console access
 
-Serial console access is available via telnet on port 500x (eg in the example json qbox was provided first so qbox serial is 5000, then ctm is 5001 and so on)
+Serial console access is available via telnet staring from port 5000.  The telnet port is based on the order the cards appear in the JSON file (eg in the example json qbox was provided first so qbox serial is 5000, then ctm is 5001 and so on)
 ```
 telnet <container-name> 5000
 telnet <container-name> 5001
 ...
 ```
 
-### Example topology file
-```yaml
-# topology.clab.yaml
-name: mylab
-topology:
-  nodes:
-    wr-1:
-      kind: linux
-      image: vrnetlab/ciena_waverouter:wr-80-00-00-0081
-      binds:
-        - ./<name>.json:/setup.json
-
-```
-
 ## System requirements
 
-- CPU: 4 cores
-- RAM: 10GB
-- DISK: ~2GB
+For each card
+- CPU: 4 cores for CTMs, 2 cores for other cards
+- RAM: 10GB for CTMs, 5GB for other cards
+- DISK: ~8GB baseline + per card use
 
 ## Configuration
 
-Initial confiuration application is not yet supported.
+Providing an initial configuration is not yet supported.
 
 ## Contact
 
