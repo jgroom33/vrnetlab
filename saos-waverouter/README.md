@@ -7,9 +7,12 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 ## Building the docker image
 
 Generate a disk image:
-  - Launch a WR simulator using the --no-reboot option:<br>
+  - git clone the [sim_scripts](https://bitbucket.ciena.com/projects/EVERNIGHT/repos/sim_scripts/browse) repo.  Ensure that this clone is not in a network mounted location (i.e. do not use your Linux home directory).
+  - Using the wr_ctm_sim.sh script in the sim_scripts checkout, launch a WR simulator using the --no-reboot option:<br>
     `sudo -E VM_NAME=WR-BLOB NODE_NAME=WR_NOPE HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BOXLANBRIDGE=virbr0 ./wr_ctm_sim.sh --version wr-80-00-00-0124 --debug --no-reboot`<br>
-    Note that an up to date checkout of the [sim_scripts](https://bitbucket.ciena.com/projects/EVERNIGHT/repos/sim_scripts/browse) repo is required to use the --no-reboot option.
+    Notes:
+    - an up to date checkout of the sim_scripts repo is required to use the --no-reboot option.
+    - this command will create a simulator instance that will exit once ONIE has run and the disk image is ready.
   - Convert the raw disk image file into qcow2:<br>
     `qemu-img convert -f raw -O qcow2 WR-BLOB-disk.img WR-BLOB-disk.qcow2`
 
