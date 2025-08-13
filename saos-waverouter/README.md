@@ -12,7 +12,7 @@ Generate a disk image:
     `sudo ./sim_clean.sh WR-BLOB`<br>
     ignore errors from this command - it will complain if the simulator isn't running.
   - Using the wr_ctm_sim.sh script in the sim_scripts checkout, launch a WR simulator using the --no-reboot option:<br>
-    `sudo -E VM_NAME=WR-BLOB NODE_NAME=WR_NOPE HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BOXLANBRIDGE=virbr0 ./wr_ctm_sim.sh --version wr-80-00-00-0124 --debug --no-reboot`<br>
+    `sudo -E VM_NAME=WR-BLOB NODE_NAME=WR_NOPE HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BRIDGE_MGMT=virbr0 BOXLANBRIDGE=virbr0 ./wr_ctm_sim.sh --version wr-80-00-00-0124 --debug --no-reboot`<br>
     Notes:
     - an up to date checkout of the sim_scripts repo is required to use the --no-reboot option.
     - this command will create a simulator instance that will exit once ONIE has run and the disk image is ready.
