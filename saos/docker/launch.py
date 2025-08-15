@@ -9,6 +9,7 @@ import sys
 import vrnetlab
 import uuid
 import socket
+import resource
 
 
 def handle_SIGCHLD(_signal, _frame):
@@ -23,6 +24,7 @@ signal.signal(signal.SIGINT, handle_SIGTERM)
 signal.signal(signal.SIGTERM, handle_SIGTERM)
 signal.signal(signal.SIGCHLD, handle_SIGCHLD)
 
+SOFT_ULIMIT_NOFILE = 524288  # from containerlab ulimit on Oracle linux 10
 TRACE_LEVEL_NUM = 9
 logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
 
@@ -218,6 +220,17 @@ class SAOS(vrnetlab.VR):
         super().__init__(username, password)
         self.vms = [SAOS_vm(hostname, username, password, conn_mode)]
 
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            new_soft = min(SOFT_ULIMIT_NOFILE, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            self.logger.info(f"ulimit -n set: soft={soft}, hard={hard}, new_soft={new_soft}")
+        except ValueError as ve:
+            self.logger.warning(f"Invalid value for ulimit -n: {ve}")
+        except PermissionError as pe:
+            self.logger.warning(f"Permission denied when setting ulimit -n: {pe}")
+        except Exception as e:
+            self.logger.warning(f"Unexpected error setting ulimit -n: {e}")
 
 if __name__ == "__main__":
     import argparse
