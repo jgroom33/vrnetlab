@@ -163,7 +163,7 @@ def get_mountpoints(dev: str) -> list:
 
 def install_partition(partdev, partition, guest_name, instance_data_files):
     try:
-        stage_path = "./{}-staging".format(guest_name)
+        stage_path = f"./{os.environ.get("CLAB_LABEL_CLAB_NODE_NAME").upper()}/{guest_name}-staging"
         mount_path = os.path.join(stage_path, partition.label)
         mkdir_p(mount_path)
 

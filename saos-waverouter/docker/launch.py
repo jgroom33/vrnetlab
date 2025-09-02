@@ -202,10 +202,14 @@ class WR_base(vrnetlab.VM):
 
         self.logger.info(f"HOUSING POOL: {HOUSING_POOL_MAX}")
 
+        node_name = os.environ.get("CLAB_LABEL_CLAB_NODE_NAME")
+        if node_name is None:
+            raise Exception("CLAB_LABEL_CLAB_NODE_NAME is not in the environment")
+
         override_dicts = {
             "override_software": {
                 "SOFTWARE": {
-                    "NN": f"{os.environ.get("CLAB_LABEL_CLAB_NODE_NAME")}"
+                    "NN": f"{node_name}"
                 },
                 "HOUSING": {
                     "HOUSING_ID": f"{self.housing_id}",
