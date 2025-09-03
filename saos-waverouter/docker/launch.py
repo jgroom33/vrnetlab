@@ -18,6 +18,7 @@ OVMF_VARS_gz = "/backup/OVMF_VARS_bkup.fd.gz"
 OVMF_VARS = "/backup/OVMF_VARS_bkup.fd"
 CTM_AP_gz = "/CTM_ap.img.tar.gz"
 CTM_AP = "/CTM_ap.img.tar"
+CTM_AP_img = "/CTM_ap.img"
 LINUX_BRIDGE = "int_cp"
 HOUSING_POOL_MAX = "1"
 IPV4_ADDR_OCTET4_BASE = 21
@@ -484,21 +485,25 @@ class WR(vrnetlab.VR):
             vm_info = json.load(file)
 
         self.logger.info(f"Unzip {OVMF_VARS_gz}...")
-        if not os.path.exists(OVMF_VARS_gz):
-            raise Exception(f"File {OVMF_VARS_gz} not found")
-        vrnetlab.run_command(["gunzip", OVMF_VARS_gz])
+        if not os.path.exists(OVMF_VARS):
+            if not os.path.exists(OVMF_VARS_gz):
+                raise Exception(f"File {OVMF_VARS_gz} not found")
+            vrnetlab.run_command(["gunzip", OVMF_VARS_gz])
 
         self.logger.info(f"Unzip {CTM_AP_gz} ...")
-        if not os.path.exists(CTM_AP_gz):
-            raise Exception(f"File {CTM_AP_gz} not found")
-        vrnetlab.run_command(["gunzip", CTM_AP_gz])
+        if not os.path.exists(CTM_AP):
+            if not os.path.exists(CTM_AP_gz):
+                raise Exception(f"File {CTM_AP_gz} not found")
+            vrnetlab.run_command(["gunzip", CTM_AP_gz])
 
         self.logger.info(f"Extracting {CTM_AP}...")
         if not os.path.exists(CTM_AP):
-            raise Exception(f"File {CTM_AP} not found")
-        vrnetlab.run_command(["tar", "xSf", CTM_AP])
+            if not os.path.exists(CTM_AP_img):
+                raise Exception(f"File {CTM_AP} not found")
+            vrnetlab.run_command(["tar", "xSf", CTM_AP])
 
-        vrnetlab.run_command(["mkdir", "/instance_disk"])
+        if not os.path.exists("/instance_disk"):
+            vrnetlab.run_command(["mkdir", "/instance_disk"])
 
         try:
             soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
