@@ -497,8 +497,8 @@ class WR(vrnetlab.VR):
             vrnetlab.run_command(["gunzip", CTM_AP_gz])
 
         self.logger.info(f"Extracting {CTM_AP}...")
-        if not os.path.exists(CTM_AP):
-            if not os.path.exists(CTM_AP_img):
+        if not os.path.exists(CTM_AP_img):
+            if not os.path.exists(CTM_AP):
                 raise Exception(f"File {CTM_AP} not found")
             vrnetlab.run_command(["tar", "xSf", CTM_AP])
 
