@@ -16,9 +16,7 @@ from disk import PartitionInfo, create_disk_image
 
 OVMF_VARS_gz = "/backup/OVMF_VARS_bkup.fd.gz"
 OVMF_VARS = "/backup/OVMF_VARS_bkup.fd"
-CTM_AP_gz = "/CTM_ap.img.tar.gz"
-CTM_AP = "/CTM_ap.img.tar"
-CTM_AP_img = "/CTM_ap.img"
+CTM_AP_qcow2 = "/ap_disk/CTM_ap.qcow2"
 LINUX_BRIDGE = "int_cp"
 HOUSING_POOL_MAX = "1"
 IPV4_ADDR_OCTET4_BASE = 21
@@ -326,11 +324,14 @@ class WR_ctm(WR_base):
         # 10161 - gNMI/gNOI alternate
         self.mgmt_tcp_ports.extend([179, 225, 9340, 9559, 10161])
 
-        vrnetlab.run_command(["cp", "/CTM_ap.img", f"/{self.name}_ap.img"])
+        if not os.path.exists(CTM_AP_qcow2):
+            raise Exception(f"File {CTM_AP_qcow2} not found")
+
+        vrnetlab.run_command(["cp", f"{CTM_AP_qcow2}", f"/ap_disk/{self.name}_ap.qcow2"])
         self.qemu_args.extend(
             [
                 "-drive",
-                f"if=none,file=/{self.name}_ap.img,format=raw,id=disk2",
+                f"if=none,file=/ap_disk/{self.name}_ap.qcow2,format=qcow2,id=disk2",
                 "-device",
                 "ide-hd,bus=ide.1,drive=disk2,id=sata0-0-1",
             ]
@@ -489,18 +490,6 @@ class WR(vrnetlab.VR):
             if not os.path.exists(OVMF_VARS_gz):
                 raise Exception(f"File {OVMF_VARS_gz} not found")
             vrnetlab.run_command(["gunzip", OVMF_VARS_gz])
-
-        self.logger.info(f"Unzip {CTM_AP_gz} ...")
-        if not os.path.exists(CTM_AP):
-            if not os.path.exists(CTM_AP_gz):
-                raise Exception(f"File {CTM_AP_gz} not found")
-            vrnetlab.run_command(["gunzip", CTM_AP_gz])
-
-        self.logger.info(f"Extracting {CTM_AP}...")
-        if not os.path.exists(CTM_AP_img):
-            if not os.path.exists(CTM_AP):
-                raise Exception(f"File {CTM_AP} not found")
-            vrnetlab.run_command(["tar", "xSf", CTM_AP])
 
         if not os.path.exists("/instance_disk"):
             vrnetlab.run_command(["mkdir", "/instance_disk"])

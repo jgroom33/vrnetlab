@@ -6,23 +6,34 @@ This is the vrnetlab docker image for Waverouter VM based simulator.
 
 ## Building the docker image
 
-Generate a disk image:
-  - git clone the [sim_scripts](https://bitbucket.ciena.com/projects/EVERNIGHT/repos/sim_scripts/browse) repo.  Ensure that this clone is not in a network mounted location (i.e. do not use your Linux home directory).
-  - clean previous WR-BLOB instance if it exists.  From the sim_scripts directory:<br>
+*Notes:*
+- *an up to date checkout of the sim_scripts repo is required.*
+- *the version for main and ap disk command below must match.*
+
+Generate disk images:
+
+  1. Clone the [sim_scripts](https://bitbucket.ciena.com/projects/EVERNIGHT/repos/sim_scripts/browse) repo.  Ensure that this clone is not in a network mounted location (i.e. do not use your Linux home directory).<br>
+  2. Clean previous WR-BLOB instance if it exists.  From the sim_scripts directory:<br>
     `sudo ./sim_clean.sh WR-BLOB`<br>
     ignore errors from this command - it will complain if the simulator isn't running.
+  3. Main disk image
+  - This command will create a simulator instance that will exit once ONIE has run and the disk image is ready.
   - Using the wr_ctm_sim.sh script in the sim_scripts checkout, launch a WR simulator using the --no-reboot option:<br>
-    `sudo -E VM_NAME=WR-BLOB NODE_NAME=WR_NOPE HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BRIDGE_MGMT=virbr0 BOXLANBRIDGE=virbr0 ./wr_ctm_sim.sh --version wr-80-00-00-0124 --debug --no-reboot`<br>
-    Notes:
-    - an up to date checkout of the sim_scripts repo is required to use the --no-reboot option.
-    - this command will create a simulator instance that will exit once ONIE has run and the disk image is ready.
-    - if you see an error message `ERROR     WR-BLOB is already running`, then run the ./sim_clean.sh command above.
+    `sudo -E VM_NAME=WR-BLOB NODE_NAME=WR_NOPE HOUSING_ID=1 HOUSING_POOL=1 LOCATION_ID=7 BRIDGE_MGMT=virbr0 BOXLANBRIDGE=virbr0 ./wr_ctm_sim.sh --version wr-80-00-00-0202 --debug --no-reboot`<br>
   - Convert the raw disk image file into qcow2:<br>
-    `qemu-img convert -f raw -O qcow2 WR-BLOB-disk.img WR-BLOB-disk.qcow2`
+    `qemu-img convert -f raw -O qcow2 WR-BLOB-disk.img WR-BLOB-disk.qcow2`<br>
+  4. AP disk image
+  - This command will create an AP disk with a docker registry image included
+  - Using the wr_create_ap_disk.py script in the sim_scripts checkout, create an AP disk using:
+    `sudo ./wr_create_ap_disk.py -vvvv --version wr-80-00-00-0202 --path WR-BLOB-AP-DISK`
 
-Copy the qcow2 disk image into this directory.
+Copy the main disk image (WR-BLOB-disk.qcow2) into vrnetlab/saos-waverouter/
 
-Run `make VERSION=<version>`. (eg VERSION=wr-80-00-00-0124)
+Create ap_disk directory at vrnetlab/saos-waverouter/docker/ap_disk
+
+Copy the AP disk image (WR-BLOB-AP-DISK.qcow2) into vrnetlab/saos-waverouter/docker/ap_disk/
+
+Run `make VERSION=<version>`. (eg VERSION=wr-80-00-00-0202)
 
 After typing `make VERSION=<version>`, a new image will appear named `vrnetlab/ciena_waverouter:<version>`.
 
