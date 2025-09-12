@@ -12,6 +12,7 @@ import socket
 import json
 import tempfile
 import resource
+from pathlib import Path
 from disk import PartitionInfo, create_disk_image
 
 OVMF_VARS_gz = "/backup/OVMF_VARS_bkup.fd.gz"
@@ -58,10 +59,11 @@ def gen_shared_mac(housing_id, location_id, second_last_octet, last_octet):
     )
 
 
-def create_instance_disk(override_dicts, disk_name):
+def create_instance_disk(node_name, override_dicts, disk_name):
+    instance_path = Path("/instance_disk")/node_name
+    instance_path.mkdir(parents=True, exist_ok=True)
     # instance disk creation
-    raw_disk_path = f"/instance_disk/{disk_name}.img"
-
+    raw_disk_path = f"{instance_path}/{disk_name}.img"
     instance_data_dir = f"{disk_name}_dir"
 
     with tempfile.TemporaryDirectory(prefix=instance_data_dir) as tempdir:
@@ -97,7 +99,7 @@ def create_instance_disk(override_dicts, disk_name):
                 logger.error(f"Retry creating disk image {disk_name} failed after {num_retries} times. Exiting...")
                 sys.exit(1)
 
-        convert_cmd = ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", f"{raw_disk_path}", f"/instance_disk/{disk_name}.qcow2"]
+        convert_cmd = ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", f"{raw_disk_path}", f"/instance_disk/{node_name}/{disk_name}.qcow2"]
         logger.debug("Img to qcow2 command: %s" % ' '.join(convert_cmd))
         if not os.path.exists(raw_disk_path):
             raise Exception(f"File {raw_disk_path} not found")
@@ -233,12 +235,12 @@ class WR_base(vrnetlab.VM):
             }
         }
 
-        create_instance_disk(override_dicts, self.name)
+        create_instance_disk(node_name, override_dicts, self.name)
 
         self.qemu_args.extend(
             [
                 "-drive",
-                f"if=none,file=/instance_disk/{self.name}.qcow2,format=qcow2,id=disk3",
+                f"if=none,file=/instance_disk/{node_name}/{self.name}.qcow2,format=qcow2,id=disk3",
                 "-device",
                 "ide-hd,bus=ide.2,drive=disk3,id=sata0-0-2",
             ]
@@ -499,9 +501,6 @@ class WR(vrnetlab.VR):
             if not os.path.exists(OVMF_VARS_gz):
                 raise Exception(f"File {OVMF_VARS_gz} not found")
             vrnetlab.run_command(["gunzip", OVMF_VARS_gz])
-
-        if not os.path.exists("/instance_disk"):
-            vrnetlab.run_command(["mkdir", "/instance_disk"])
 
         try:
             soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
