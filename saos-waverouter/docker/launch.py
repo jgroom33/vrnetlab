@@ -86,7 +86,16 @@ def create_instance_disk(override_dicts, disk_name):
         instance_partition = [
             PartitionInfo(1, "INSTANCE-DATA", "128M", 0x8300, "ext4", instance_data_files)
         ]
-        create_disk_image(raw_disk_path, "256M", instance_partition, disk_name)
+
+        num_retries = 5
+        retry_count = 0
+        while not (_ := create_disk_image(raw_disk_path, "256M", instance_partition, disk_name)):
+            retry_count += 1
+            if retry_count <= num_retries:
+                logger.info(f"------Retry creating disk image {disk_name}------{retry_count} of {num_retries}------")
+            else:
+                logger.error(f"Retry creating disk image {disk_name} failed after {num_retries} times. Exiting...")
+                sys.exit(1)
 
         convert_cmd = ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", f"{raw_disk_path}", f"/instance_disk/{disk_name}.qcow2"]
         logger.debug("Img to qcow2 command: %s" % ' '.join(convert_cmd))
