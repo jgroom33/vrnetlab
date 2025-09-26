@@ -128,7 +128,8 @@ class SAOS_vm(vrnetlab.VM):
 
         # 179 - BGP
         # 225 - debug shell
-        self.mgmt_tcp_ports.extend([179, 225])
+        # 4243 - docker daemon
+        self.mgmt_tcp_ports.extend([179, 225, 4243])
 
         self.hostname = hostname
 
