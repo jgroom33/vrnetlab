@@ -65,12 +65,15 @@ def create_instance_disk(node_name, override_dicts, disk_name):
     # instance disk creation
     raw_disk_path = f"{instance_path}/{disk_name}.img"
     instance_data_dir = f"{disk_name}_dir"
+    config_file_path = "config/config.cfg"  # path for config file which is set in kne
 
     with tempfile.TemporaryDirectory(prefix=instance_data_dir) as tempdir:
         instance_data_files = []
         for key, value in override_dicts.items():
             instance_data_file = f"{tempdir}/{key}.json"
             instance_data_files.append(instance_data_file)
+            if os.path.exists(config_file_path):
+                instance_data_files.append(config_file_path)
 
             # serializing json
             json_object = json.dumps(value, indent=4)
