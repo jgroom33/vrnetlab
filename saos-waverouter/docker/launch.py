@@ -19,6 +19,7 @@ OVMF_VARS_gz = "/backup/OVMF_VARS_bkup.fd.gz"
 OVMF_VARS = "/backup/OVMF_VARS_bkup.fd"
 CTM_AP_qcow2 = "/ap_disk/CTM_ap.qcow2"
 LINUX_BRIDGE = "int_cp"
+FABRIC_BRIDGE = "fabric_br"
 HOUSING_POOL_MAX = "1"
 
 # hostfwd configuration
@@ -491,12 +492,16 @@ class WR_qb(WR_base):
             variant="wr-qb",
             product_number="qb615xqsfpdd",
             size=str(ram_mb * 1024 * 1024),
-            num_backplane_if=6,
+            num_backplane_if=5,
             ram=ram_mb,
             num_nics=15,
             smp="4,sockets=1,dies=1,cores=2,threads=2"
         )
         self.start_nic_eth_idx = nic_eth_start
+
+        # Fabric interface count and name
+        self.num_fabric_if = 1
+        self.fabric_if = f"{self.name}fb0"
 
     def gen_mgmt(self):
         """Generate mgmt interface(s)
@@ -530,6 +535,14 @@ class WR_qb(WR_base):
                         % (self.if_list[i], gen_shared_mac(int(self.housing_id),  int(self.location_id), i+2, i), i),
                         "-netdev",
                         "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.if_list[i], self.if_list[i])])
+
+        # Fabric interface
+        if self.num_fabric_if == 1:
+            res.extend(["-device",
+                        "virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,multifunction=on,addr=0x4.0x5"
+                        % (self.fabric_if, gen_shared_mac(int(self.housing_id), int(self.location_id), 0xfb, 0x01)),
+                        "-netdev",
+                        "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.fabric_if, self.fabric_if)])
 
         return res
 
@@ -574,6 +587,15 @@ class WR_qb(WR_base):
                 addr += 1
 
         return res
+
+    def start(self):
+        super(WR_qb, self).start()
+
+        # Add interface to fabric bridge
+        self.logger.info(f"Adding fabric interface from {self.name} to the fabric bridge...")
+        if self.num_fabric_if:
+            vrnetlab.run_command(["brctl", "addif", f"{FABRIC_BRIDGE}", f"{self.fabric_if}"])
+            vrnetlab.run_command(["ip", "link", "set", self.fabric_if, "up"])
 
 
 class WR(vrnetlab.VR):
@@ -675,6 +697,11 @@ class WR(vrnetlab.VR):
         self.logger.debug("Creating linux bridge...")
         vrnetlab.run_command(["brctl", "addbr", f"{LINUX_BRIDGE}"])
         vrnetlab.run_command(["ip", "link", "set", f"{LINUX_BRIDGE}", "up"])
+
+        # set up fabric bridge
+        self.logger.debug("Creating fabric bridge...")
+        vrnetlab.run_command(["brctl", "addbr", f"{FABRIC_BRIDGE}"])
+        vrnetlab.run_command(["ip", "link", "set", f"{FABRIC_BRIDGE}", "up"])
 
 
 if __name__ == "__main__":
