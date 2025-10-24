@@ -199,6 +199,13 @@ class WR_base(vrnetlab.VM):
                 "qom-type=rng-random,id=objrng0,filename=/dev/urandom",
                 "-device",
                 "virtio-rng-pci,rng=objrng0,id=rng0,bus=pci.1,addr=0x0",
+                # TPM device - emulated TPM 2.0
+                "-chardev",
+                f"socket,id=chrtpm{num},path=/tmp/swtpm-sock-{num}",
+                "-tpmdev",
+                f"emulator,id=tpm{num},chardev=chrtpm{num}",
+                "-device",
+                f"tpm-tis,tpmdev=tpm{num}",
             ]
         )
         self.smbios = [
@@ -250,6 +257,27 @@ class WR_base(vrnetlab.VM):
         )
 
     def start(self):
+        # Start swtpm (software TPM emulator) before starting the VM
+        self.logger.info(f"Starting swtpm for {self.name}...")
+        swtpm_dir = f"/tmp/swtpm-{self.num}"
+        os.makedirs(swtpm_dir, exist_ok=True)
+        
+        # Start swtpm process in the background
+        swtpm_cmd = [
+            "swtpm", "socket",
+            "--tpmstate", f"dir={swtpm_dir}",
+            "--ctrl", f"type=unixio,path=/tmp/swtpm-sock-{self.num}",
+            "--tpm2",
+            "--log", f"level=20,file=/tmp/swtpm-{self.num}.log"
+        ]
+        
+        try:
+            import subprocess
+            self.swtpm_process = subprocess.Popen(swtpm_cmd)
+            self.logger.info(f"swtpm started with PID {self.swtpm_process.pid}")
+        except Exception as e:
+            self.logger.warning(f"Failed to start swtpm: {e}. Continuing without TPM support.")
+        
         # use parent class start() function
         super(WR_base, self).start()
 

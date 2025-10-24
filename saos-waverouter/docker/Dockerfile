@@ -2,6 +2,7 @@ FROM ghcr.io/srl-labs/vrnetlab-base:0.2.1
 
 RUN apt update && apt install -y \
     gdisk \
+    swtpm \
     && rm -rf /var/lib/apt/lists/* #Clean up cache to reduce image size
 
 ARG IMAGE
