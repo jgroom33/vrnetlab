@@ -365,7 +365,8 @@ class WR_ctm(WR_base):
         # 9340 - gRIBI
         # 9559 - P4RT
         # 10161 - gNMI/gNOI alternate
-        self.mgmt_tcp_ports.extend([179, 225, 4243, 9340, 9559, 10161])
+        # 64444 - EN-DBG
+        self.mgmt_tcp_ports.extend([179, 225, 4243, 9340, 9559, 10161, 64444])
 
         if not os.path.exists(CTM_AP_qcow2):
             raise Exception(f"File {CTM_AP_qcow2} not found")
