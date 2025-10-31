@@ -340,8 +340,11 @@ class WR_base(vrnetlab.VM):
 
 
 class WR_ctm(WR_base):
-    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id):
+    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id, ram_mb=None):
         # NOTE: Can not use logger until superclass constructor is complete
+        if ram_mb is None:
+            ram_mb = 12288 
+        
         super(WR_ctm, self).__init__(
             hostname=hostname,
             username=username,
@@ -352,9 +355,9 @@ class WR_ctm(WR_base):
             location_id=location_id,
             variant="wr-ctm",
             product_number="ne26xqsfp28",
-            size="10737418240",
+            size=str(ram_mb * 1024 * 1024),
             num_backplane_if=5,
-            ram=10240,
+            ram=ram_mb,
             num_nics=0,
             smp="4,sockets=1,dies=1,cores=2,threads=2"
         )
@@ -425,8 +428,11 @@ class WR_ctm(WR_base):
 
 
 class WR_qb(WR_base):
-    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id, nic_eth_start):
+    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id, nic_eth_start, ram_mb=None):
         # NOTE: Can not use logger until superclass constructor is complete
+        if ram_mb is None:
+            ram_mb = 5120 
+        
         super(WR_qb, self).__init__(
             hostname=hostname,
             username=username,
@@ -437,9 +443,9 @@ class WR_qb(WR_base):
             location_id=location_id,
             variant="wr-qb",
             product_number="qb615xqsfpdd",
-            size="5368709120",
+            size=str(ram_mb * 1024 * 1024),
             num_backplane_if=6,
-            ram=5120,
+            ram=ram_mb,
             num_nics=15,
             smp="4,sockets=1,dies=1,cores=2,threads=2"
         )
@@ -583,6 +589,15 @@ class WR(vrnetlab.VR):
                     self.logger.info(f"----------------VM{num} INFO-----------------")
                     self.logger.info(f"housing: {housing_id}, housing type: {housing_type}, location: {location_id}, box_type: {box_type}")
 
+                    # Extract memory setting from JSON (in MB)
+                    memory_mb = housing_dict[location_id].get('memory')
+                    
+                    kwargs = {}
+                    if memory_mb is not None:
+                        memory_mb = int(memory_mb)
+                        self.logger.info(f"Using custom memory setting: {memory_mb} MB")
+                        kwargs['ram_mb'] = memory_mb
+
                     args = [
                         hostname,
                         username,
@@ -595,10 +610,10 @@ class WR(vrnetlab.VR):
 
                     if box_type == "wr-qbox":
                         args.append(start_eth)
-                        vm = vm_class[box_type](*args)
+                        vm = vm_class[box_type](*args, **kwargs)
                         start_eth += vm.num_nics
                     else:
-                        vm = vm_class[box_type](*args)
+                        vm = vm_class[box_type](*args, **kwargs)
 
                     self.vms.append(vm)
                     num += 1
