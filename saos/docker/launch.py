@@ -10,6 +10,10 @@ import vrnetlab
 import uuid
 import socket
 import resource
+import subprocess
+import asyncio
+from telnet_logger import start_telnet_loggers
+proxy_port = 5000
 
 
 def handle_SIGCHLD(_signal, _frame):
@@ -124,6 +128,13 @@ class SAOS_vm(vrnetlab.VM):
             username, password, disk_image=disk_image, ram=8196, cpu="host", smp="2,sockets=1,cores=1,threads=2",
         )
 
+        for i, arg in enumerate(self.qemu_args):
+            if arg.startswith("telnet:0.0.0.0:50"):
+                qemu_port = arg.replace("telnet:0.0.0.0:50", "telnet:0.0.0.0:51")
+                self.logger.info(f"Overriding QEMU telnet port to {qemu_port}")
+                self.qemu_args[i] = qemu_port
+                break
+
         self.logger.info(f"Variant: {self.variant}")
 
         # 179 - BGP
@@ -233,9 +244,9 @@ class SAOS(vrnetlab.VR):
         except Exception as e:
             self.logger.warning(f"Unexpected error setting ulimit -n: {e}")
 
+
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(
         "--trace", action="store_true", help="enable trace level logging"
@@ -262,4 +273,14 @@ if __name__ == "__main__":
         args.password,
         conn_mode=args.connection_mode,
     )
+    cmd = [
+            "uv",
+            "run",
+            "telnetproxy.py",
+            "--remote-server",  "127.0.0.1",
+            "--remote-port", "5100",
+            "--listen-port", str(proxy_port)
+    ]
+    subprocess.Popen(cmd)
+    start_telnet_loggers(ports=[proxy_port])
     vr.start()

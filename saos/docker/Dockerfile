@@ -6,5 +6,6 @@ COPY $IMAGE* /
 
 # copy python scripts for launching VM
 COPY *.py /
+RUN uv pip install telnetlib3
 
 EXPOSE 22 179 225 443 830 9339
