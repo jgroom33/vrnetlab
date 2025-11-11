@@ -31,6 +31,7 @@ DEBUG_DNS_IP = "10.0.0.3"
 DEBUG_DHCP_START_BASE = 21
 HOSTFWD_SSH_PORT_BASE = 50225
 HOSTFWD_DOCKER_PORT_BASE = 54243
+HOSTFWD_GDB_PORT_BASE = 64444
 
 
 def handle_SIGCHLD(_signal, _frame):
@@ -69,19 +70,6 @@ def gen_shared_mac(housing_id, location_id, second_last_octet, last_octet):
     )
 
 
-def generate_hostfwd_rules(vm_num):
-    """Generate hostfwd rules for deploy script integration"""
-    rules = []
-    
-    # SSH access (port 225) for all VMs
-    ssh_port = HOSTFWD_SSH_PORT_BASE + vm_num
-    rules.append(f"hostfwd=tcp::{ssh_port}-:225")
-    
-    # Docker daemon access (port 4243) for all VMs
-    docker_port = HOSTFWD_DOCKER_PORT_BASE + vm_num
-    rules.append(f"hostfwd=tcp::{docker_port}-:4243")
-    
-    return ",".join(rules)
 
 
 def create_instance_disk(node_name, override_dicts, disk_name):
@@ -393,8 +381,8 @@ class WR_ctm(WR_base):
         # 9340 - gRIBI
         # 9559 - P4RT
         # 10161 - gNMI/gNOI alternate
-        # 64444 - EN-DBG
-        self.mgmt_tcp_ports.extend([179, 9340, 9559, 10161, 64444])
+        # 64444 - EN-DBG (in hostfwd)
+        self.mgmt_tcp_ports.extend([179, 9340, 9559, 10161])
 
         if not os.path.exists(CTM_AP_qcow2):
             raise Exception(f"File {CTM_AP_qcow2} not found")
@@ -409,6 +397,27 @@ class WR_ctm(WR_base):
             ]
         )
 
+    def generate_hostfwd_rules(self):
+        """Generate hostfwd rules for deploy script integration with logging"""
+        rules = []
+        
+        # SSH access (port 225)
+        ssh_port = HOSTFWD_SSH_PORT_BASE + self.num
+        rules.append(f"hostfwd=tcp::{ssh_port}-:225")
+        self.logger.info(f"CTM VM{self.num} ({self.name}): SSH port mapping {ssh_port} -> 225")
+        
+        # Docker daemon access (port 4243)
+        docker_port = HOSTFWD_DOCKER_PORT_BASE + self.num
+        rules.append(f"hostfwd=tcp::{docker_port}-:4243")
+        self.logger.info(f"CTM VM{self.num} ({self.name}): Docker daemon port mapping {docker_port} -> 4243")
+        
+        # GDB access (port 64444+)
+        gdb_port = HOSTFWD_GDB_PORT_BASE + self.num
+        rules.append(f"hostfwd=tcp::{gdb_port}-:{gdb_port}")
+        self.logger.info(f"CTM VM{self.num} ({self.name}): GDB port mapping {gdb_port} -> {gdb_port}")
+        
+        return ",".join(rules)
+
     def gen_mgmt(self):
         """Generate mgmt interface(s)
 
@@ -416,7 +425,7 @@ class WR_ctm(WR_base):
         """
         res = []
         # Generate hostfwd rules for deploy script integration
-        hostfwd_rules = generate_hostfwd_rules(self.num)
+        hostfwd_rules = self.generate_hostfwd_rules()
         
         # Calculate DHCP IP for this VM
         dhcp_ip = DEBUG_DHCP_START_BASE + self.num
@@ -511,7 +520,7 @@ class WR_qb(WR_base):
         res = []
 
         # Generate hostfwd rules for deploy script integration
-        hostfwd_rules = generate_hostfwd_rules(self.num)
+        hostfwd_rules = self.generate_hostfwd_rules()
         
         # Calculate DHCP IP for this VM
         dhcp_ip = DEBUG_DHCP_START_BASE + self.num
