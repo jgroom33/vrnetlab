@@ -20,7 +20,16 @@ OVMF_VARS = "/backup/OVMF_VARS_bkup.fd"
 CTM_AP_qcow2 = "/ap_disk/CTM_ap.qcow2"
 LINUX_BRIDGE = "int_cp"
 HOUSING_POOL_MAX = "1"
-IPV4_ADDR_OCTET4_BASE = 21
+
+# hostfwd configuration
+DEBUG_NETWORK_BASE = "10.0.0.0"
+DEBUG_NETWORK_BASE_STR = "10.0.0"  # First three octets for DHCP address construction
+DEBUG_SUBNET_MASK = "24"
+DEBUG_HOST_IP = "10.0.0.2"
+DEBUG_DNS_IP = "10.0.0.3"
+DEBUG_DHCP_START_BASE = 21
+HOSTFWD_SSH_PORT_BASE = 50225
+HOSTFWD_DOCKER_PORT_BASE = 54243
 
 
 def handle_SIGCHLD(_signal, _frame):
@@ -57,6 +66,21 @@ def gen_shared_mac(housing_id, location_id, second_last_octet, last_octet):
         second_last_octet,
         last_octet,
     )
+
+
+def generate_hostfwd_rules(vm_num):
+    """Generate hostfwd rules for deploy script integration"""
+    rules = []
+    
+    # SSH access (port 225) for all VMs
+    ssh_port = HOSTFWD_SSH_PORT_BASE + vm_num
+    rules.append(f"hostfwd=tcp::{ssh_port}-:225")
+    
+    # Docker daemon access (port 4243) for all VMs
+    docker_port = HOSTFWD_DOCKER_PORT_BASE + vm_num
+    rules.append(f"hostfwd=tcp::{docker_port}-:4243")
+    
+    return ",".join(rules)
 
 
 def create_instance_disk(node_name, override_dicts, disk_name):
@@ -363,13 +387,13 @@ class WR_ctm(WR_base):
         )
 
         # 179 - BGP
-        # 225 - debug shell
-        # 4243 - docker daemon
+        # 225 - debug shell (in hostfwd)
+        # 4243 - docker daemon (in hostfwd)
         # 9340 - gRIBI
         # 9559 - P4RT
         # 10161 - gNMI/gNOI alternate
         # 64444 - EN-DBG
-        self.mgmt_tcp_ports.extend([179, 225, 4243, 9340, 9559, 10161, 64444])
+        self.mgmt_tcp_ports.extend([179, 9340, 9559, 10161, 64444])
 
         if not os.path.exists(CTM_AP_qcow2):
             raise Exception(f"File {CTM_AP_qcow2} not found")
@@ -390,19 +414,42 @@ class WR_ctm(WR_base):
         We override the default function for the wr-ctm
         """
         res = []
-
+        # Generate hostfwd rules for deploy script integration
+        hostfwd_rules = generate_hostfwd_rules(self.num)
+        
+        # Calculate DHCP IP for this VM
+        dhcp_ip = DEBUG_DHCP_START_BASE + self.num
+        
         if self.housing_id == "1":
-            # debug interface
+            # debug interface with hostfwd port forwarding
             res = super(WR_ctm, self).gen_mgmt()
             replace_index = res.index("virtio-net-pci,netdev=p00,mac=%s" % self.mgmt_mac)
             res[replace_index] += ",multifunction=on,addr=0x3"
+            
+            # Find the netdev configuration and extract existing hostfwd rules from parent
+            netdev_index = None
+            for i, arg in enumerate(res):
+                if arg.startswith("user,id=p00"):
+                    netdev_index = i
+                    break
 
+            if netdev_index is not None:
+                # Extract all hostfwd rules from parent's netdev string
+                parent_netdev = res[netdev_index]
+                parent_hostfwd_rules = re.findall(r'hostfwd=[^,]+', parent_netdev)
+                parent_hostfwd_str = ",".join(parent_hostfwd_rules)
+                
+                # Combine parent's hostfwd rules with our new deploy script rules
+                all_hostfwd_rules = f"{parent_hostfwd_str},{hostfwd_rules}"
+                
+                # Use shared debug network with hostfwd port forwarding
+                res[netdev_index] = f"user,id=p00,net={DEBUG_NETWORK_BASE}/{DEBUG_SUBNET_MASK},host={DEBUG_HOST_IP},dns={DEBUG_DNS_IP},dhcpstart={DEBUG_NETWORK_BASE_STR}.{dhcp_ip},{all_hostfwd_rules},tftp=/tftpboot"
         else:
-            # debug interface
+            # debug interface with hostfwd port forwarding
             res.extend(["-device",
                         "virtio-net-pci,netdev=p00,mac=%s,multifunction=on,addr=0x3" % self.mgmt_mac,
                         "-netdev",
-                        "user,id=p00,net=10.0.0.0/24,host=10.0.0.2,dns=10.0.0.3,dhcpstart=10.0.0.%02x" % (IPV4_ADDR_OCTET4_BASE + self.num)])
+                        f"user,id=p00,net={DEBUG_NETWORK_BASE}/{DEBUG_SUBNET_MASK},host={DEBUG_HOST_IP},dns={DEBUG_DNS_IP},dhcpstart={DEBUG_NETWORK_BASE_STR}.{dhcp_ip},{hostfwd_rules}"])
 
         # mgmt interface
         res.extend(["-device",
@@ -458,11 +505,17 @@ class WR_qb(WR_base):
         """
         res = []
 
-        # debug interface
+        # Generate hostfwd rules for deploy script integration
+        hostfwd_rules = generate_hostfwd_rules(self.num)
+        
+        # Calculate DHCP IP for this VM
+        dhcp_ip = DEBUG_DHCP_START_BASE + self.num
+
+        # debug interface with hostfwd port forwarding
         res.extend(["-device",
                     "virtio-net-pci,netdev=p00,mac=%s,multifunction=on,addr=0x3" % self.mgmt_mac,
                     "-netdev",
-                    "user,id=p00,net=10.0.0.0/24,host=10.0.0.2,dns=10.0.0.3,dhcpstart=10.0.0.%02x" % (IPV4_ADDR_OCTET4_BASE + self.num)])
+                    f"user,id=p00,net={DEBUG_NETWORK_BASE}/{DEBUG_SUBNET_MASK},host={DEBUG_HOST_IP},dns={DEBUG_DNS_IP},dhcpstart={DEBUG_NETWORK_BASE_STR}.{dhcp_ip},{hostfwd_rules}"])
 
         # add virtio NIC for internal control plane interface to wr-qb
         res.extend(["-device",
