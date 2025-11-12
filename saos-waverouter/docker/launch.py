@@ -28,7 +28,7 @@ DEBUG_NETWORK_BASE_STR = "10.0.0"  # First three octets for DHCP address constru
 DEBUG_SUBNET_MASK = "24"
 DEBUG_HOST_IP = "10.0.0.2"
 DEBUG_DNS_IP = "10.0.0.3"
-DEBUG_DHCP_START_BASE = 21
+DEBUG_DHCP_START_BASE = 15
 HOSTFWD_SSH_PORT_BASE = 50225
 HOSTFWD_DOCKER_PORT_BASE = 54243
 HOSTFWD_GDB_PORT_BASE = 64444
@@ -436,24 +436,18 @@ class WR_ctm(WR_base):
             replace_index = res.index("virtio-net-pci,netdev=p00,mac=%s" % self.mgmt_mac)
             res[replace_index] += ",multifunction=on,addr=0x3"
             
-            # Find the netdev configuration and extract existing hostfwd rules from parent
+            # Find the netdev configuration and hostfwd rules
             netdev_index = None
             for i, arg in enumerate(res):
                 if arg.startswith("user,id=p00"):
                     netdev_index = i
                     break
 
-            if netdev_index is not None:
-                # Extract all hostfwd rules from parent's netdev string
-                parent_netdev = res[netdev_index]
-                parent_hostfwd_rules = re.findall(r'hostfwd=[^,]+', parent_netdev)
-                parent_hostfwd_str = ",".join(parent_hostfwd_rules)
-                
-                # Combine parent's hostfwd rules with our new deploy script rules
-                all_hostfwd_rules = f"{parent_hostfwd_str},{hostfwd_rules}"
-                
-                # Use shared debug network with hostfwd port forwarding
-                res[netdev_index] = f"user,id=p00,net={DEBUG_NETWORK_BASE}/{DEBUG_SUBNET_MASK},host={DEBUG_HOST_IP},dns={DEBUG_DNS_IP},dhcpstart={DEBUG_NETWORK_BASE_STR}.{dhcp_ip},{all_hostfwd_rules},tftp=/tftpboot"
+            if netdev_index is None:
+                self.logger.warning("No netdev found for mgmt interface to append hostfwd rules")
+            else:
+                # Append custom hostfwd rules to the parent's netdev string
+                res[netdev_index] = res[netdev_index].rstrip(",") + f",{hostfwd_rules}"
         else:
             # debug interface with hostfwd port forwarding
             res.extend(["-device",
