@@ -300,6 +300,27 @@ class WR_base(vrnetlab.VM):
             vrnetlab.run_command(["brctl", "addif", f"{LINUX_BRIDGE}", f"{self.if_list[i]}"])
             vrnetlab.run_command(["ip", "link", "set", f"{self.if_list[i]}", "up"])
 
+    def generate_hostfwd_rules(self):
+        """Generate hostfwd rules for deploy script integration with logging"""
+        rules = []
+        
+        # SSH access (port 225)
+        ssh_port = HOSTFWD_SSH_PORT_BASE + self.num
+        rules.append(f"hostfwd=tcp::{ssh_port}-:225")
+        self.logger.info(f"{self.variant.upper()} VM{self.num} ({self.name}): SSH port mapping {ssh_port} -> 225")
+        
+        # Docker daemon access (port 4243)
+        docker_port = HOSTFWD_DOCKER_PORT_BASE + self.num
+        rules.append(f"hostfwd=tcp::{docker_port}-:4243")
+        self.logger.info(f"{self.variant.upper()} VM{self.num} ({self.name}): Docker daemon port mapping {docker_port} -> 4243")
+        
+        # GDB access (port 64444+)
+        gdb_port = HOSTFWD_GDB_PORT_BASE + self.num
+        rules.append(f"hostfwd=tcp::{gdb_port}-:{gdb_port}")
+        self.logger.info(f"{self.variant.upper()} VM{self.num} ({self.name}): GDB port mapping {gdb_port} -> {gdb_port}")
+        
+        return ",".join(rules)
+
     def bootstrap_spin(self):
         """This function should be called periodically to do work."""
 
@@ -396,27 +417,6 @@ class WR_ctm(WR_base):
                 "ide-hd,bus=ide.1,drive=disk2,id=sata0-0-1",
             ]
         )
-
-    def generate_hostfwd_rules(self):
-        """Generate hostfwd rules for deploy script integration with logging"""
-        rules = []
-        
-        # SSH access (port 225)
-        ssh_port = HOSTFWD_SSH_PORT_BASE + self.num
-        rules.append(f"hostfwd=tcp::{ssh_port}-:225")
-        self.logger.info(f"CTM VM{self.num} ({self.name}): SSH port mapping {ssh_port} -> 225")
-        
-        # Docker daemon access (port 4243)
-        docker_port = HOSTFWD_DOCKER_PORT_BASE + self.num
-        rules.append(f"hostfwd=tcp::{docker_port}-:4243")
-        self.logger.info(f"CTM VM{self.num} ({self.name}): Docker daemon port mapping {docker_port} -> 4243")
-        
-        # GDB access (port 64444+)
-        gdb_port = HOSTFWD_GDB_PORT_BASE + self.num
-        rules.append(f"hostfwd=tcp::{gdb_port}-:{gdb_port}")
-        self.logger.info(f"CTM VM{self.num} ({self.name}): GDB port mapping {gdb_port} -> {gdb_port}")
-        
-        return ",".join(rules)
 
     def gen_mgmt(self):
         """Generate mgmt interface(s)
