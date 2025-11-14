@@ -5,7 +5,10 @@ import logging
 import os
 import re
 import signal
+import subprocess
 import sys
+import telnetlib
+import time
 import vrnetlab
 import uuid
 import socket
@@ -14,6 +17,7 @@ import tempfile
 import resource
 from pathlib import Path
 from disk import PartitionInfo, create_disk_image
+from telnet_logger import start_telnet_loggers
 
 OVMF_VARS_gz = "/backup/OVMF_VARS_bkup.fd.gz"
 OVMF_VARS = "/backup/OVMF_VARS_bkup.fd"
@@ -68,8 +72,6 @@ def gen_shared_mac(housing_id, location_id, second_last_octet, last_octet):
         second_last_octet,
         last_octet,
     )
-
-
 
 
 def create_instance_disk(node_name, override_dicts, disk_name):
@@ -156,6 +158,15 @@ class WR_base(vrnetlab.VM):
             username, password, disk_image=disk_image, ram=ram, cpu="host",
             smp=smp, num=num
         )
+
+        # Override serial port configuration for telnet proxy/logger architecture:
+        # Parent class default is 50XX, we change QEMU to 51XX to free up 50XX for proxies to listen on
+        self.serial_port = 5100 + self.num
+        for i, arg in enumerate(self.qemu_args):
+            if arg.startswith("telnet:0.0.0.0:50"):
+                self.qemu_args[i] = f"telnet:0.0.0.0:51{self.num:02d},server,nowait"
+                self.logger.info(f"VM{self.num}: Serial console on port 51{self.num:02d} (proxied to 50{self.num:02d})")
+                break
 
         self.variant = variant
         self.product_number = product_number
@@ -285,7 +296,6 @@ class WR_base(vrnetlab.VM):
         ]
         
         try:
-            import subprocess
             self.swtpm_process = subprocess.Popen(swtpm_cmd)
             self.logger.info(f"swtpm started with PID {self.swtpm_process.pid}")
         except Exception as e:
@@ -293,6 +303,12 @@ class WR_base(vrnetlab.VM):
         
         # use parent class start() function
         super(WR_base, self).start()
+        
+        try:
+            self.tn = telnetlib.Telnet("127.0.0.1", 5100 + self.num)
+            self.logger.info(f"Bootstrap connected to VM{self.num} serial port 51{self.num:02d}")
+        except Exception as e:
+            self.logger.error(f"Unable to connect to VM serial console on port {5100 + self.num}: {e}")
 
         # add interface to internal control plane bridge
         self.logger.info(f"Adding backplane interfaces from {self.name} into the bridge...")
@@ -705,6 +721,47 @@ class WR(vrnetlab.VR):
         vrnetlab.run_command(["ip", "link", "set", f"{FABRIC_BRIDGE}", "up"])
 
 
+def start_telnet_infrastructure(vms, logger):
+    """Setup telnet multiplexing and logging for all VM consoles    
+    QEMU VMs listen on ports: 5100, 5101, 5102, ... (VM.num based)
+    Proxies listen on ports:  5000, 5001, 5002, ... (external access)
+    Logs written to: log_5000.txt, log_5001.txt, ...
+    """
+    num_vms = len(vms)
+    logger.info(f"Setting up telnet infrastructure for {num_vms} VM(s)")
+    
+    # Start a telnet proxy subprocess for each VM
+    for vm in vms:
+        listen_port = 5000 + vm.num
+        remote_port = 5100 + vm.num
+        
+        cmd = [
+            "uv",
+            "run",
+            "telnetproxy.py",
+            "--remote-server", "127.0.0.1",
+            "--remote-port", str(remote_port),
+            "--listen-port", str(listen_port),
+            "--heartbeat", "86400"  # 24 hours 
+        ]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info(f"Telnet proxy for {vm.name}: external port {listen_port} -> QEMU port {remote_port}")
+    
+    # Give proxies a moment to start listening
+    time.sleep(0.5)
+    
+    # Start telnet loggers for each console (connects to proxy ports)
+    logger_ports = [5000 + vm.num for vm in vms]
+    start_telnet_loggers(ports=logger_ports)
+    logger.info(f"Console logging active for ports: {logger_ports}")
+    logger.info(f"Log files: {', '.join([f'log_{p}.txt' for p in logger_ports])}")
+    if len(logger_ports) > 1:
+        logger.info(f"Interactive access: telnet localhost {logger_ports[0]} (or {', '.join(map(str, logger_ports[1:]))})")
+    else:
+        logger.info(f"Interactive access: telnet localhost {logger_ports[0]}")
+    logger.info("Each log file: 5MB max size, 5 backup files (rotating)")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -734,4 +791,8 @@ if __name__ == "__main__":
         args.password,
         conn_mode=args.connection_mode,
     )
+    
+    # Setup telnet proxies and loggers for all VM consoles
+    start_telnet_infrastructure(vr.vms, logger)
+    
     vr.start()

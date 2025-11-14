@@ -10,6 +10,7 @@ COPY $IMAGE* /
 
 # copy python scripts for launching VM
 COPY *.py /
+RUN uv pip install telnetlib3
 
 #need these files inside docker folder before running make
 COPY OVMF_VARS_bkup.fd.gz /backup/
@@ -17,5 +18,5 @@ COPY ap_disk/*.qcow2 /ap_disk/CTM_ap.qcow2
 COPY /partition_helper.sh /
 
 # Expose standard ports and hostfwd ports for up to 9 VMs
-# SSH: 50225-50233, Docker daemon: 54243-54251, GDB: 64444-64452
-EXPOSE 22 179 225 443 830 9339 50225 50226 50227 50228 50229 50230 50231 50232 50233 54243 54244 54245 54246 54247 54248 54249 54250 54251 64444 64445 64446 64447 64448 64449 64450 64451 64452
+# Telnet console: 5000-5008, SSH: 50225-50233, Docker daemon: 54243-54251, GDB: 64444-64452
+EXPOSE 22 179 225 443 830 9339 5000-5008 50225-50233 54243-54251 64444-64452 
