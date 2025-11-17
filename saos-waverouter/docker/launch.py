@@ -747,9 +747,6 @@ def start_telnet_infrastructure(vms, logger):
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         logger.info(f"Telnet proxy for {vm.name}: external port {listen_port} -> QEMU port {remote_port}")
     
-    # Give proxies a moment to start listening
-    time.sleep(0.5)
-    
     # Start telnet loggers for each console (connects to proxy ports)
     logger_ports = [5000 + vm.num for vm in vms]
     start_telnet_loggers(ports=logger_ports)
