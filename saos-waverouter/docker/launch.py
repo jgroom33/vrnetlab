@@ -8,7 +8,6 @@ import signal
 import subprocess
 import sys
 import telnetlib
-import time
 import vrnetlab
 import uuid
 import socket
@@ -615,6 +614,65 @@ class WR_qb(WR_base):
             vrnetlab.run_command(["ip", "link", "set", self.fabric_if, "up"])
 
 
+class WR_fb(WR_base):
+    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id, ram_mb=None):
+        # NOTE: Can not use logger until superclass constructor is complete
+        if ram_mb is None:
+            ram_mb = 5120 
+        
+        super(WR_fb, self).__init__(
+            hostname=hostname,
+            username=username,
+            password=password,
+            conn_mode=conn_mode,
+            num=num,
+            housing_id=housing_id,
+            location_id=location_id,
+            variant="wr-fbox",
+            product_number="fb1232xqsfpdd",
+            size=str(ram_mb * 1024 * 1024),
+            num_backplane_if=6,
+            ram=ram_mb,
+            num_nics=0,
+            smp="2,sockets=1,dies=1,cores=1,threads=2"
+        )
+
+    def gen_mgmt(self):
+        """Generate mgmt interface(s)
+
+        We override the default function for the wr-fbox
+        """
+        res = []
+
+        # Generate hostfwd rules for deploy script integration
+        hostfwd_rules = self.generate_hostfwd_rules()
+        
+        # Calculate DHCP IP for this VM
+        dhcp_ip = DEBUG_DHCP_START_BASE + self.num
+
+        # debug interface with hostfwd port forwarding
+        res.extend(["-device",
+                    "virtio-net-pci,netdev=p00,mac=%s,addr=0x3" % self.mgmt_mac,
+                    "-netdev",
+                    f"user,id=p00,net={DEBUG_NETWORK_BASE}/{DEBUG_SUBNET_MASK},host={DEBUG_HOST_IP},dns={DEBUG_DNS_IP},dhcpstart={DEBUG_NETWORK_BASE_STR}.{dhcp_ip},{hostfwd_rules}"])
+
+        # add virtio NIC for internal control plane interface to wr-fbox
+        res.extend(["-device",
+                    "virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,multifunction=on,addr=0x4"
+                    % (self.if_list[0], gen_shared_mac(int(self.housing_id), int(self.location_id), 2, 0)),
+                    "-netdev",
+                    "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.if_list[0], self.if_list[0])])
+
+        for i in range(1, self.num_backplane_if):
+            res.extend(["-device",
+                        "virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,addr=0x4.0x%s"
+                        % (self.if_list[i], gen_shared_mac(int(self.housing_id),  int(self.location_id), i+2, i), i),
+                        "-netdev",
+                        "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.if_list[i], self.if_list[i])])
+
+        return res
+
+
 class WR(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
         super().__init__(username, password)
@@ -651,6 +709,7 @@ class WR(vrnetlab.VR):
         vm_class = {
             "wr-ctm": WR_ctm,
             "wr-qbox": WR_qb,
+            "wr-fbox": WR_fb,
         }
 
         self.logger.debug(f"Number of nodes: {len(vm_info)}")
