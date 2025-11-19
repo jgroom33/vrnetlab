@@ -18,5 +18,5 @@ COPY ap_disk/*.qcow2 /ap_disk/CTM_ap.qcow2
 COPY /partition_helper.sh /
 
 # Expose standard ports and hostfwd ports for up to 9 VMs
-# Telnet console: 5000-5008, SSH: 50225-50233, Docker daemon: 54243-54251, GDB: 64444-64452
-EXPOSE 22 179 225 443 830 9339 5000-5008 50225-50233 54243-54251 64444-64452 
+# SSH: 50225-50233, Docker daemon: 54243-54251, GDB: 64444-64452
+EXPOSE 22 179 225 443 830 9339 50225-50233 54243-54251 64444-64452
