@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import sys
+import telnetlib
 import vrnetlab
 import uuid
 import socket
@@ -15,6 +16,7 @@ import tempfile
 import resource
 from pathlib import Path
 from disk import PartitionInfo, create_disk_image
+from telnet_logger import start_telnet_infrastructure
 
 OVMF_VARS_gz = "/backup/OVMF_VARS_bkup.fd.gz"
 OVMF_VARS = "/backup/OVMF_VARS_bkup.fd"
@@ -155,6 +157,15 @@ class WR_base(vrnetlab.VM):
             smp=smp, num=num
         )
 
+        # Override serial port configuration for telnet proxy/logger architecture:
+        # Parent class default is 50XX, we change QEMU to 51XX to free up 50XX for proxies to listen on
+        self.serial_port = 5100 + self.num
+        for i, arg in enumerate(self.qemu_args):
+            if arg.startswith("telnet:0.0.0.0:50"):
+                self.qemu_args[i] = f"telnet:0.0.0.0:51{self.num:02d},server,nowait"
+                self.logger.info(f"VM{self.num}: Serial console on port 51{self.num:02d} (proxied to 50{self.num:02d})")
+                break
+
         self.variant = variant
         self.product_number = product_number
         self.housing_id = housing_id
@@ -290,6 +301,12 @@ class WR_base(vrnetlab.VM):
         
         # use parent class start() function
         super(WR_base, self).start()
+        
+        try:
+            self.tn = telnetlib.Telnet("127.0.0.1", 5100 + self.num)
+            self.logger.info(f"Bootstrap connected to VM{self.num} serial port 51{self.num:02d}")
+        except Exception as e:
+            self.logger.error(f"Unable to connect to VM serial console on port {5100 + self.num}: {e}")
 
         # add interface to internal control plane bridge
         self.logger.info(f"Adding backplane interfaces from {self.name} into the bridge...")
@@ -791,4 +808,8 @@ if __name__ == "__main__":
         args.password,
         conn_mode=args.connection_mode,
     )
+    
+    # Setup telnet proxies and loggers for all VM consoles
+    start_telnet_infrastructure(vr.vms, logger)
+    
     vr.start()

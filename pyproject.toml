@@ -1,15 +1,32 @@
-[project]
-dependencies = [
-  "passlib>=1.7.4",
-  "pyyaml>=6.0.2",
-  "scrapli>=2024.7.30.post1",
-  "scrapli-community",
-]
-description = "Building containers for VM-based Network OSes for Containerlab"
+[tool.poetry]
 name = "vrnetlab"
-readme = "README.md"
-requires-python = ">=3.11,<3.13"
 version = "0.1.0"
+description = "Building containers for VM-based Network OSes for Containerlab"
+readme = "README.md"
+authors = ["RE-SIM Infrastructure Team"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+passlib = "^1.7.4"
+pyyaml = "^6.0.2"
+telnetlib3 = "^2.0.4"
+scrapli = "^2024.7.30"
 
 [tool.uv.sources]
 scrapli-community = { git = "https://github.com/scrapli/scrapli_community", rev = "d862833" }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
+pytest-cov = "^4.1.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "--verbose",
+    "--strict-markers",
+]

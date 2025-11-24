@@ -1,0 +1,8 @@
+[test]
+[test.build]
+
+# All commands run from the root of the repo
+commands = [
+    "poetry install",
+    "PYTHONPATH=common/ poetry run pytest tests/ --capture=no --verbose",
+]
