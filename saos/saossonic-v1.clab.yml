@@ -1,6 +1,9 @@
 name: saos-test
 
 topology:
+  defaults:
+    env:
+      CLAB_MGMT_PASSTHROUGH: False
   nodes:
     sonic-vm-1:
       kind: sonic-vm

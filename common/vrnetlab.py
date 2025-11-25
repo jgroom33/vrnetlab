@@ -763,8 +763,10 @@ class VM:
 
         Defaults to using self.tn as connection but this can be overridden
         by passing a telnetlib.Telnet object in the con argument.
+        Return output received from con.
         """
 
+        res = ""
         if self.use_scrapli:
             return self.wait_write_scrapli(cmd, wait)
 
@@ -796,13 +798,16 @@ class VM:
                 (con.read_very_eager()) if clean_buffer else None
             )  # Clear any remaining characters in buffer
 
-            self.logger.info(f"read from {con_name}: '{res.decode()}'")
+            res = res.decode()
+            self.logger.info(f"read from {con_name}: '{res}'")
+
             # log the cleaned buffer if it's not empty
             if cleaned_buf:
                 self.logger.info(f"cleaned buffer: '{cleaned_buf.decode()}'")
 
         self.logger.debug(f"writing to {con_name}: '{cmd}'")
         con.write("{}\r".format(cmd).encode())
+        return res
 
     def wait_write_scrapli(self, cmd, wait="__defaultpattern__"):
         """

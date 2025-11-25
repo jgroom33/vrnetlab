@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import datetime
+import time
 import logging
 import os
 import re
@@ -204,6 +205,8 @@ class SAOS_vm(vrnetlab.VM):
                 self.logger.debug("login complete")
 
                 # run config commands
+                if self.mgmt_passthrough:
+                    self.bootstrap_config()
                 self.startup_config()
                 # close telnet connection
                 self.tn.close()
@@ -225,15 +228,58 @@ class SAOS_vm(vrnetlab.VM):
 
         return
 
+    def bootstrap_config(self):
+        """Do the actual bootstrap config"""
+        new_password = False
+        ipv4, subnet = self.mgmt_address_ipv4.split('/')
+        wait_strings = ["BASE-dnx-SIM>", "BASE-dnx-SIM?>"]
+
+        self.logger.info("applying bootstrap configuration")
+        for i, wait_str in enumerate(wait_strings):
+            op = self.wait_write("show bootstrap-status", wait=wait_str)
+            if "Bootstrap Done" in op:
+                break
+
+        while True:
+            op = self.wait_write("show bootstrap-status", wait=wait_strings[-1])
+            time.sleep(5)
+            if "Bootstrap Done" in op:
+                break
+
+        self.wait_write("exit", wait=wait_strings[-1])
+        self.logger.debug("trying to log in with 'diag'")
+        self.wait_write("diag", wait="login:")
+        self.wait_write("ciena123", wait="Password:")
+        self.logger.debug("login completed for bootstrap config")
+
+        op = self.wait_write("config", wait=f"{self.variant}>")
+        # newer load has the string "password" in the output
+        if "password" in op:
+            new_password = True
+
+        # newer load requires password change
+        if new_password:
+            self.wait_write("system aaa authentication users user diag config password ciena1234")
+            self.logger.debug("trying to log in with 'diag'")
+            self.wait_write("diag", wait="login:")
+            self.wait_write("ciena1234", wait="Password:")
+            self.logger.debug("login completed after password change")
+            self.wait_write("config", wait=f"{self.variant}>")
+            # change password back to default password
+            self.wait_write("system aaa authentication users user diag config password ciena123")
+
+        self.wait_write(f"system config hostname {self.hostname}")
+        self.wait_write("dhcp-client client mgmtbr0 admin-enable false")
+        self.wait_write(f"oc-if:interfaces interface mgmtbr0 ipv4 addresses address {ipv4} config ip {ipv4} prefix-length {subnet}")
+        self.wait_write(f"rib vrf default ipv4 0.0.0.0/0 next-hop {re.sub(r'\d+$', '1', ipv4)}")
+        self.wait_write("exit")
+        self.wait_write("exit")
+        self.wait_write("exit")
+        self.wait_write("exit")
+
     def startup_config(self):
-        """Provide initial node configuration"""
+        """Load additional config provided by user."""
         return
-        # FIXME: need to debug this logic
-        self.logger.info("applying configuration")
-        self.wait_write("config", wait=r'\S+>')
-        self.wait_write(f"system config hostname {self.hostname}", wait=r'\S+#')
-        self.wait_write("exit", wait=r'\S+#')
-        self.logger.info("applying configuration done")
 
 
 class SAOS(vrnetlab.VR):
