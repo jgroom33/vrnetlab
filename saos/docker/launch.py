@@ -81,11 +81,20 @@ class SAOS_vm(vrnetlab.VM):
         "5168": {
             "interface_count"       : 36,
         },
+        "5169": {
+            "interface_count"       : 16,
+        },
         "5170": {
             "interface_count"       : 44,
         },
         "5171": {
             "interface_count"       : 56,
+        },
+        "5184": {
+            "interface_count"       : 36,
+        },
+        "5186": {
+            "interface_count"       : 12,
         },
         "8110": {
             "interface_count"       : 58,
