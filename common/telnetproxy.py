@@ -14,22 +14,21 @@ else:
     create_task = asyncio.ensure_future
 
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-logging.basicConfig(
-    filename='telnet_multiplexer.log',
-    level=logging.INFO,
-    format=LOG_FORMAT
-)
 log = logging.getLogger(__name__)
 
 
 class RemoteSession:
     """Manages connection to the remote telnet server with reconnection logic."""
 
-    def __init__(self, remote_server, remote_port, reconnect_delay=5, queue_limit=1000):
+    IAC = b"\xff"  # Interpret As Command
+    NOP = b"\xf1"  # No Operation (used as keepalive)
+
+    def __init__(self, remote_server, remote_port, heartbeat=30, reconnect_delay=5, queue_limit=1000):
         self.remote_server = remote_server
         self.remote_port = remote_port
         self.reader = None
         self.writer = None
+        self.heartbeat = heartbeat
         self.reconnect_delay = reconnect_delay
         self.queue = asyncio.Queue(maxsize=queue_limit)
         self.closing = False
@@ -68,10 +67,10 @@ class RemoteSession:
                     break
 
             try:
-                # Short timeout for responsiveness, telnetlib3 will timeout after 300s anyway
+                # Use heartbeat interval as timeout - if no data, send keepalive
                 data = await asyncio.wait_for(
                     self.reader.read(1024), 
-                    timeout=1
+                    timeout=self.heartbeat
                 )
                 
                 if not data or self.reader.at_eof():
@@ -82,13 +81,26 @@ class RemoteSession:
                 await callback(data)
 
             except asyncio.TimeoutError:
-                continue
+                # No data received within heartbeat interval - probe connection
+                await self.send_heartbeat()
             except asyncio.CancelledError:
                 log.info("Read loop cancelled")
                 break
             except Exception as e:
                 log.warning(f"Remote read error: {e}")
                 await self.cleanup_connection()
+
+    async def send_heartbeat(self):
+        """Send IAC NOP as keepalive to probe connection health."""
+        if not self.writer:
+            return
+        try:
+            self.writer.write(self.IAC + self.NOP)
+            await asyncio.wait_for(self.writer.drain(), timeout=10)
+            log.debug("Sent remote heartbeat (IAC NOP)")
+        except Exception as e:
+            log.warning(f"Remote heartbeat failed: {e}")
+            await self.cleanup_connection()
 
     async def write(self, data):
         """Queue data to be sent to remote."""
@@ -172,10 +184,14 @@ class RemoteSession:
 class TelnetManager:
     """Manages multiple client connections with broadcasting."""
 
-    def __init__(self, remote, lock, client_timeout=86400):
+    IAC = b"\xff"  # Interpret As Command
+    NOP = b"\xf1"  # No Operation (used as keepalive)
+
+    def __init__(self, remote, lock, heartbeat=30, client_timeout=86400):
         self.clients = {}
         self.remote = remote
         self.lock = lock
+        self.heartbeat = heartbeat
         self.client_timeout = client_timeout
 
     def register(self, writer):
@@ -241,8 +257,23 @@ class TelnetManager:
             except Exception as e:
                 log.warning(f"Client read error {peer}: {e}")
 
+        async def keepalive():
+            """Send periodic IAC NOP to keep client connection alive."""
+            try:
+                while not writer.is_closing():
+                    await asyncio.sleep(self.heartbeat)
+                    if writer.is_closing():
+                        break
+                    writer.write(self.IAC + self.NOP)
+                    await asyncio.wait_for(writer.drain(), timeout=5)
+                    log.debug(f"Sent keepalive to client {peer}")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.debug(f"Client keepalive failed {peer}: {e}")
+
         try:
-            await from_client()
+            await asyncio.gather(from_client(), keepalive())
         except Exception as e:
             log.error(f"Client handler error for {peer}: {e}")
         finally:
@@ -257,12 +288,12 @@ class TelnetManager:
 class ConnectionMuxer:
     """Main multiplexer coordinating remote and client connections."""
     
-    def __init__(self, listen_ip, listen_port, remote_server, remote_port, client_timeout=86400):
+    def __init__(self, listen_ip, listen_port, remote_server, remote_port, heartbeat=30, client_timeout=86400):
         self.listen_ip = listen_ip
         self.listen_port = listen_port
-        self.remote = RemoteSession(remote_server, remote_port)
+        self.remote = RemoteSession(remote_server, remote_port, heartbeat=heartbeat)
         self.lock = asyncio.Lock()
-        self.clients = TelnetManager(self.remote, self.lock, client_timeout)
+        self.clients = TelnetManager(self.remote, self.lock, heartbeat=heartbeat, client_timeout=client_timeout)
         self.server = None
         self.read_task = None
 
@@ -315,6 +346,12 @@ class ConnectionMuxer:
 
 async def main():
     """Main entry point."""
+    logging.basicConfig(
+        filename='telnet_multiplexer.log',
+        level=logging.INFO,
+        format=LOG_FORMAT
+    )
+    
     parser = argparse.ArgumentParser(description="Telnet Proxy Multiplexer")
     parser.add_argument("--remote-server", default="127.0.0.1", 
                        help="Remote server IP or hostname")
@@ -324,6 +361,8 @@ async def main():
                        help="IP address to listen on")
     parser.add_argument("--listen-port", type=int, default=5000, 
                        help="Port to listen on")
+    parser.add_argument("--heartbeat", type=int, default=30,
+                       help="Heartbeat interval in seconds (default: 30)")
     parser.add_argument("--client-timeout", type=int, default=86400,
                        help="Client read timeout in seconds (default: 24 hours)")
     args = parser.parse_args()
@@ -333,6 +372,7 @@ async def main():
         listen_port=args.listen_port,
         remote_server=args.remote_server,
         remote_port=args.remote_port,
+        heartbeat=args.heartbeat,
         client_timeout=args.client_timeout,
     )
 

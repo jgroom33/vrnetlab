@@ -398,9 +398,12 @@ class TestTelnetManager:
         mock_sock = Mock()
         mock_sock.setsockopt = Mock()
         mock_writer.get_extra_info = Mock(side_effect=lambda x: ("127.0.0.1", 12345) if x == "peername" else mock_sock)
-        mock_writer.is_closing = Mock(side_effect=[False, True])  # Loop once then exit
+        # Need enough False returns to allow the read loop to process data before exiting
+        mock_writer.is_closing = Mock(side_effect=[False, False, False, False, False, True])
         mock_writer.close = Mock()
         mock_writer.wait_closed = AsyncMock()
+        mock_writer.write = Mock()
+        mock_writer.drain = AsyncMock()
         
         # Simulate reading data then EOF
         mock_reader.read = AsyncMock(side_effect=[b"client data", b""])
@@ -524,6 +527,200 @@ class TestConnectionMuxer:
         
         # Verify remote was closed
         assert close_called
+
+
+class TestHeartbeat:
+    """Test heartbeat/keepalive functionality."""
+
+    @pytest.mark.asyncio
+    async def test_remote_session_send_heartbeat_success(self, mock_telnetlib3):
+        """Test successful heartbeat send to remote."""
+        mock_reader = AsyncMock()
+        mock_writer = Mock()
+        mock_writer.get_extra_info = Mock(return_value=Mock())
+        mock_writer.write = Mock()
+        mock_writer.drain = AsyncMock()
+        mock_writer.close = Mock()
+        mock_writer.wait_closed = AsyncMock()
+        
+        mock_telnetlib3.open_connection = AsyncMock(return_value=(mock_reader, mock_writer))
+        
+        session = RemoteSession("127.0.0.1", 5100, heartbeat=30)
+        await session.connect()
+        
+        # Send heartbeat
+        await session.send_heartbeat()
+        
+        # Verify IAC NOP was sent
+        mock_writer.write.assert_called_with(RemoteSession.IAC + RemoteSession.NOP)
+        assert mock_writer.drain.called
+        
+        await session.close()
+
+    @pytest.mark.asyncio
+    async def test_remote_session_send_heartbeat_no_writer(self):
+        """Test heartbeat does nothing when no writer exists."""
+        session = RemoteSession("127.0.0.1", 5100)
+        session.writer = None
+        
+        # Should not raise exception
+        await session.send_heartbeat()
+        
+        await session.close()
+
+    @pytest.mark.asyncio
+    async def test_remote_session_send_heartbeat_failure_triggers_cleanup(self, mock_telnetlib3):
+        """Test heartbeat failure triggers connection cleanup."""
+        mock_reader = AsyncMock()
+        mock_writer = Mock()
+        mock_writer.get_extra_info = Mock(return_value=Mock())
+        mock_writer.write = Mock()
+        mock_writer.drain = AsyncMock(side_effect=Exception("Connection lost"))
+        mock_writer.close = Mock()
+        mock_writer.wait_closed = AsyncMock()
+        
+        mock_telnetlib3.open_connection = AsyncMock(return_value=(mock_reader, mock_writer))
+        
+        session = RemoteSession("127.0.0.1", 5100)
+        await session.connect()
+        
+        # Send heartbeat that will fail
+        await session.send_heartbeat()
+        
+        # Connection should be cleaned up (writer set to None)
+        assert session.writer is None
+        assert session.reader is None
+        
+        await session.close()
+
+    @pytest.mark.asyncio
+    async def test_remote_session_heartbeat_timeout_triggers_heartbeat(self, mock_telnetlib3):
+        """Test that read timeout in read_loop triggers heartbeat."""
+        mock_reader = AsyncMock()
+        mock_writer = Mock()
+        mock_writer.get_extra_info = Mock(return_value=Mock())
+        mock_writer.write = Mock()
+        mock_writer.drain = AsyncMock()
+        mock_writer.close = Mock()
+        mock_writer.wait_closed = AsyncMock()
+        
+        call_count = {'read': 0, 'heartbeat': 0}
+        
+        async def mock_read(*args, **kwargs):
+            call_count['read'] += 1
+            if call_count['read'] == 1:
+                raise asyncio.TimeoutError()  # Trigger heartbeat
+            return b""  # EOF to exit
+        
+        mock_reader.read = mock_read
+        mock_reader.at_eof = Mock(return_value=False)
+        
+        mock_telnetlib3.open_connection = AsyncMock(return_value=(mock_reader, mock_writer))
+        
+        session = RemoteSession("127.0.0.1", 5100, heartbeat=0.1)
+        await session.connect()
+        
+        async def callback(data):
+            pass
+        
+        task = create_task_compat(session.read_loop(callback))
+        await asyncio.sleep(0.3)
+        session.closing = True
+        
+        try:
+            await asyncio.wait_for(task, timeout=1)
+        except asyncio.TimeoutError:
+            task.cancel()
+        
+        # Verify heartbeat was sent (IAC NOP written)
+        # Check that write was called with IAC NOP at some point
+        write_calls = mock_writer.write.call_args_list
+        heartbeat_sent = any(
+            call[0] == (RemoteSession.IAC + RemoteSession.NOP,) 
+            for call in write_calls
+        )
+        assert heartbeat_sent, f"Expected heartbeat to be sent, got calls: {write_calls}"
+        
+        await session.close()
+
+    @pytest.mark.asyncio
+    async def test_client_keepalive_sends_iac_nop(self):
+        """Test client keepalive sends IAC NOP to client."""
+        mock_remote = Mock()
+        mock_remote.write = AsyncMock()
+        mock_lock = asyncio.Lock()
+        
+        manager = TelnetManager(mock_remote, mock_lock, heartbeat=0.1)
+        
+        mock_reader = AsyncMock()
+        mock_writer = Mock()
+        mock_sock = Mock()
+        mock_sock.setsockopt = Mock()
+        mock_writer.get_extra_info = Mock(side_effect=lambda x: ("127.0.0.1", 12345) if x == "peername" else mock_sock)
+        mock_writer.write = Mock()
+        mock_writer.drain = AsyncMock()
+        mock_writer.close = Mock()
+        mock_writer.wait_closed = AsyncMock()
+        
+        # Track is_closing calls to control loop
+        is_closing_count = {'count': 0}
+        def is_closing_side_effect():
+            is_closing_count['count'] += 1
+            # Exit after a few iterations
+            return is_closing_count['count'] > 4
+        
+        mock_writer.is_closing = Mock(side_effect=is_closing_side_effect)
+        
+        # Reader returns EOF immediately to exit from_client task
+        mock_reader.read = AsyncMock(return_value=b"")
+        
+        task = create_task_compat(manager.client_handler(mock_reader, mock_writer))
+        
+        # Wait for keepalive to trigger
+        await asyncio.sleep(0.3)
+        
+        # Cancel task
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        
+        # Verify IAC NOP was sent to client
+        write_calls = mock_writer.write.call_args_list
+        keepalive_sent = any(
+            call[0] == (TelnetManager.IAC + TelnetManager.NOP,)
+            for call in write_calls
+        )
+        assert keepalive_sent, f"Expected keepalive to be sent, got calls: {write_calls}"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_parameter_propagation(self):
+        """Test heartbeat parameter is properly propagated through components."""
+        custom_heartbeat = 60
+        
+        muxer = ConnectionMuxer(
+            "0.0.0.0", 5000, "127.0.0.1", 5100,
+            heartbeat=custom_heartbeat
+        )
+        
+        # Verify heartbeat is set on RemoteSession
+        assert muxer.remote.heartbeat == custom_heartbeat
+        
+        # Verify heartbeat is set on TelnetManager
+        assert muxer.clients.heartbeat == custom_heartbeat
+
+    @pytest.mark.asyncio
+    async def test_client_timeout_parameter(self):
+        """Test client_timeout parameter is properly set."""
+        custom_timeout = 3600
+        
+        muxer = ConnectionMuxer(
+            "0.0.0.0", 5000, "127.0.0.1", 5100,
+            client_timeout=custom_timeout
+        )
+        
+        assert muxer.clients.client_timeout == custom_timeout
 
 
 class TestErrorScenarios:
