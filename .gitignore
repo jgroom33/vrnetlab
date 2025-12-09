@@ -3,7 +3,7 @@
 venv
 *.qcow2
 cisco*.bin
-# *.gz
+*.pyc
 *.xz
 *.vmdk
 *.iso

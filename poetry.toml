@@ -1,0 +1,6 @@
+[repositories]
+[repositories.artifactory]
+url = "https://artifactory.ciena.com/api/pypi/blueplanet-pypi/simple"
+
+[virtualenvs]
+in-project = true
