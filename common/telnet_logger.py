@@ -5,6 +5,14 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 
+def silence_telnetlib3_logging():
+    """Suppress telnetlib3 and asyncio DEBUG output from docker logs."""
+    for logger_name in ['telnetlib3', 'asyncio']:
+        lib_logger = logging.getLogger(logger_name)
+        lib_logger.setLevel(logging.WARNING)
+
+silence_telnetlib3_logging()
+
 def create_port_logger(port, max_size_mb=5, backup_count=5):
     """Create a logger for a specific port with rotating file handler."""
     logger = logging.getLogger(f"telnet_{port}")
@@ -208,8 +216,3 @@ def start_telnet_infrastructure(vms, logger):
     start_telnet_loggers(ports=logger_ports)
     logger.info(f"Console logging active for ports: {logger_ports}")
     logger.info(f"Log files: {', '.join([f'log_{p}.txt' for p in logger_ports])}")
-    if len(logger_ports) > 1:
-        logger.info(f"Interactive access: telnet localhost {logger_ports[0]} (or {', '.join(map(str, logger_ports[1:]))})")
-    else:
-        logger.info(f"Interactive access: telnet localhost {logger_ports[0]}")
-    logger.info("Each log file: 5MB max size, 5 backup files (rotating)")
