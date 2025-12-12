@@ -14,6 +14,8 @@ import socket
 import json
 import tempfile
 import resource
+import argparse
+import time
 from pathlib import Path
 from disk import PartitionInfo, create_disk_image
 from telnet_logger import start_telnet_infrastructure
@@ -221,15 +223,9 @@ class WR_base(vrnetlab.VM):
                 "qom-type=rng-random,id=objrng0,filename=/dev/urandom",
                 "-device",
                 "virtio-rng-pci,rng=objrng0,id=rng0,bus=pci.1,addr=0x0",
-                # TPM device - emulated TPM 2.0
-                "-chardev",
-                f"socket,id=chrtpm{num},path=/tmp/swtpm-sock-{num}",
-                "-tpmdev",
-                f"emulator,id=tpm{num},chardev=chrtpm{num}",
-                "-device",
-                f"tpm-tis,tpmdev=tpm{num}",
             ]
         )
+
         self.smbios = [
             f"type=1,manufacturer=Ciena,product={self.product_number},serial={self.serial_number}",
             f"type=2,manufacturer=Ciena,product={self.product_number}",
@@ -297,8 +293,42 @@ class WR_base(vrnetlab.VM):
             self.swtpm_process = subprocess.Popen(swtpm_cmd)
             self.logger.info(f"swtpm started with PID {self.swtpm_process.pid}")
         except Exception as e:
+            self.swtpm_process = None
             self.logger.warning(f"Failed to start swtpm: {e}. Continuing without TPM support.")
-        
+
+        # Check if swtpm process is running
+        if self.swtpm_process and self.swtpm_process.poll() is None:
+            # Wait for the socket file to appear
+            socket_path = f"/tmp/swtpm-sock-{self.num}"
+            max_wait = 5  # seconds
+            wait_interval = 0.1  # seconds
+            elapsed = 0
+
+            while not os.path.exists(socket_path) and elapsed < max_wait:
+                time.sleep(wait_interval)
+                elapsed += wait_interval
+
+            if os.path.exists(socket_path):
+                self.logger.info(f"swtpm socket {socket_path} is ready after {elapsed} seconds")
+
+                self.qemu_args.extend(
+                    [
+                        # TPM device - emulated TPM 2.0
+                        "-chardev",
+                        f"socket,id=chrtpm{self.num},path=/tmp/swtpm-sock-{self.num}",
+                        "-tpmdev",
+                        f"emulator,id=tpm{self.num},chardev=chrtpm{self.num}",
+                        "-device",
+                        f"tpm-tis,tpmdev=tpm{self.num}",
+                    ]
+                )
+
+            else:
+                self.logger.warning(f"swtpm socket {socket_path} did not appear within {max_wait} seconds")
+                if self.swtpm_process:
+                    self.swtpm_process.kill()
+                self.swtpm_process = None
+
         # use parent class start() function
         super(WR_base, self).start()
         
@@ -780,7 +810,6 @@ class WR(vrnetlab.VR):
 
 
 if __name__ == "__main__":
-    import argparse
 
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(
