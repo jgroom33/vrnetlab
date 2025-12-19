@@ -520,129 +520,6 @@ class WR_ctm(WR_base):
         return res
 
 
-class WR_qb(WR_base):
-    def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id, nic_eth_start, ram_mb=None):
-        # NOTE: Can not use logger until superclass constructor is complete
-        if ram_mb is None:
-            ram_mb = 5120 
-        
-        super(WR_qb, self).__init__(
-            hostname=hostname,
-            username=username,
-            password=password,
-            conn_mode=conn_mode,
-            num=num,
-            housing_id=housing_id,
-            location_id=location_id,
-            variant="wr-qb",
-            product_number="qb615xqsfpdd",
-            size=str(ram_mb * 1024 * 1024),
-            num_backplane_if=5,
-            ram=ram_mb,
-            num_nics=15,
-            smp="4,sockets=1,dies=1,cores=2,threads=2"
-        )
-        self.start_nic_eth_idx = nic_eth_start
-
-        # Fabric interface count and name
-        self.num_fabric_if = 1
-        self.fabric_if = f"{self.name}fb0"
-
-    def gen_mgmt(self):
-        """Generate mgmt interface(s)
-
-        We override the default function for the wr-qb
-        """
-        res = []
-
-        # Generate hostfwd rules for deploy script integration
-        hostfwd_rules = self.generate_hostfwd_rules()
-        
-        # Calculate DHCP IP for this VM
-        dhcp_ip = DEBUG_DHCP_START_BASE + self.num
-
-        # debug interface with hostfwd port forwarding
-        res.extend(["-device",
-                    "virtio-net-pci,netdev=p00,mac=%s,multifunction=on,addr=0x3" % self.mgmt_mac,
-                    "-netdev",
-                    f"user,id=p00,net={DEBUG_NETWORK_BASE}/{DEBUG_SUBNET_MASK},host={DEBUG_HOST_IP},dns={DEBUG_DNS_IP},dhcpstart={DEBUG_NETWORK_BASE_STR}.{dhcp_ip},{hostfwd_rules}"])
-
-        # add virtio NIC for internal control plane interface to wr-qb
-        res.extend(["-device",
-                    "virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,multifunction=on,addr=0x4"
-                    % (self.if_list[0], gen_shared_mac(int(self.housing_id), int(self.location_id), 2, 0)),
-                    "-netdev",
-                    "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.if_list[0], self.if_list[0])])
-
-        for i in range(1, self.num_backplane_if):
-            res.extend(["-device",
-                        "virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,addr=0x4.0x%s"
-                        % (self.if_list[i], gen_shared_mac(int(self.housing_id),  int(self.location_id), i+2, i), i),
-                        "-netdev",
-                        "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.if_list[i], self.if_list[i])])
-
-        # Fabric interface
-        if self.num_fabric_if == 1:
-            res.extend(["-device",
-                        "virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,multifunction=on,addr=0x4.0x5"
-                        % (self.fabric_if, gen_shared_mac(int(self.housing_id), int(self.location_id), 0xfb, 0x01)),
-                        "-netdev",
-                        "tap,ifname=%s,id=%s,script=no,downscript=no" % (self.fabric_if, self.fabric_if)])
-
-        return res
-
-    def gen_nics(self):
-        """Generate qemu args for the normal traffic carrying interface(s)"""
-        self.nic_provision_delay()
-
-        res = []
-
-        if self.conn_mode == "tc":
-            self.create_tc_tap_ifup()
-
-        start_eth = self.start_nic_eth_idx
-        end_eth = self.start_nic_eth_idx + self.num_nics
-        addr = 0x8
-        ext = 0x0
-        for i in range(start_eth, end_eth):
-
-            if ext == 0:
-                mf = "multifunction=on,"
-                ext_str = ""
-            else:
-                mf = ""
-                ext_str = f".0x{ext}"
-
-            mac = f"{self.mgmt_mac[:-2]}{(i+0x10):02x}"
-
-            res.extend([
-                "-device",
-                f"{self.nic_type},netdev=p{i:02d},mac={mac},bus=pcie.0,{mf}addr=0x{addr:02x}{ext_str}"
-            ])
-
-            # if the matching container interface ethX doesn't exist, create a dummy interface
-            if not os.path.exists(f"/sys/class/net/eth{i}"):
-                res.extend(["-netdev", f"socket,id=p{i:02d},listen=:{i + 10000}"])
-            else:
-                res.extend(["-netdev", f"tap,id=p{i:02d},ifname=tap{i},script=/etc/tc-tap-ifup,downscript=no"])
-
-            # increment bus addressing
-            ext = (ext + 1) % 8
-            if ext == 0:
-                addr += 1
-
-        return res
-
-    def start(self):
-        super(WR_qb, self).start()
-
-        # Add interface to fabric bridge
-        self.logger.info(f"Adding fabric interface from {self.name} to the fabric bridge...")
-        if self.num_fabric_if:
-            vrnetlab.run_command(["brctl", "addif", f"{FABRIC_BRIDGE}", f"{self.fabric_if}"])
-            vrnetlab.run_command(["ip", "link", "set", self.fabric_if, "up"])
-
-
 class WR_fb(WR_base):
     def __init__(self, hostname, username, password, conn_mode, num, housing_id, location_id, ram_mb=None):
         # NOTE: Can not use logger until superclass constructor is complete
@@ -701,13 +578,18 @@ class WR_fb(WR_base):
 
         return res
 
-class WR_ib(WR_base):
+
+class WR_interface_box(WR_base):
+    """Generic interface box class supporting QBox, IBox, etc."""
+
     def __init__(self, hostname, username, password, conn_mode, num, housing_id,
-                 location_id, nic_eth_start, ram_mb=None):
+                 location_id, nic_eth_start, variant="wr-qbox", product_number="qb615xqsfpdd",
+                 num_ports=15, ram_mb=None):
+
         if ram_mb is None:
             ram_mb = 5120
 
-        super(WR_ib, self).__init__(
+        super(WR_interface_box, self).__init__(
             hostname=hostname,
             username=username,
             password=password,
@@ -715,22 +597,24 @@ class WR_ib(WR_base):
             num=num,
             housing_id=housing_id,
             location_id=location_id,
-            variant="wr-ibox",
-            product_number="ob1216xosfp800",
+            variant=variant,
+            product_number=product_number,
             size=str(ram_mb * 1024 * 1024),
             num_backplane_if=5,
             ram=ram_mb,
-            num_nics=16,  # 16 instead of 15
+            num_nics=num_ports,  # Configurable!
             smp="4,sockets=1,dies=1,cores=2,threads=2"
         )
         self.start_nic_eth_idx = nic_eth_start
+
+        # Fabric interface count and name
         self.num_fabric_if = 1
         self.fabric_if = f"{self.name}fb0"
 
     def gen_mgmt(self):
         """Generate mgmt interface(s)
 
-        We override the default function for the wr-ib
+        We override the default function for interface boxes
         """
         res = []
 
@@ -746,7 +630,7 @@ class WR_ib(WR_base):
                     "-netdev",
                     f"user,id=p00,net={DEBUG_NETWORK_BASE}/{DEBUG_SUBNET_MASK},host={DEBUG_HOST_IP},dns={DEBUG_DNS_IP},dhcpstart={DEBUG_NETWORK_BASE_STR}.{dhcp_ip},{hostfwd_rules}"])
 
-        # add virtio NIC for internal control plane interface to wr-qb
+        # add virtio NIC for internal control plane interface
         res.extend(["-device",
                     "virtio-net-pci,netdev=%s,mac=%s,bus=pcie.0,multifunction=on,addr=0x4"
                     % (self.if_list[0], gen_shared_mac(int(self.housing_id), int(self.location_id), 2, 0)),
@@ -813,13 +697,35 @@ class WR_ib(WR_base):
         return res
 
     def start(self):
-        super(WR_ib, self).start()
+        super(WR_interface_box, self).start()
 
         # Add interface to fabric bridge
         self.logger.info(f"Adding fabric interface from {self.name} to the fabric bridge...")
         if self.num_fabric_if:
             vrnetlab.run_command(["brctl", "addif", f"{FABRIC_BRIDGE}", f"{self.fabric_if}"])
             vrnetlab.run_command(["ip", "link", "set", self.fabric_if, "up"])
+
+
+# Factory functions for specific interface box types
+def WR_qb(hostname, username, password, conn_mode, num, housing_id, location_id,
+          nic_eth_start, ram_mb=None):
+    """QBox: 15-port QSFP-DD interface box"""
+    return WR_interface_box(
+        hostname, username, password, conn_mode, num, housing_id, location_id,
+        nic_eth_start, variant="wr-qbox", product_number="qb615xqsfpdd",
+        num_ports=15, ram_mb=ram_mb
+    )
+
+
+def WR_ib(hostname, username, password, conn_mode, num, housing_id, location_id,
+          nic_eth_start, ram_mb=None):
+    """IBox: 16-port OSFP800 interface box"""
+    return WR_interface_box(
+        hostname, username, password, conn_mode, num, housing_id, location_id,
+        nic_eth_start, variant="wr-ibox", product_number="ob1216xosfp800",
+        num_ports=16, ram_mb=ram_mb
+    )
+
 
 class WR(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
