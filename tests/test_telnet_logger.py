@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import glob
 import os
 
-from telnet_logger import (
+from saos.docker.telnet_logger import (
     create_port_logger,
     telnet_logger,
     TelnetLoggerManager,
@@ -86,7 +86,7 @@ def shutdown_event():
 @pytest.fixture
 def mock_telnetlib3():
     """Mock telnetlib3.open_connection."""
-    with patch("telnet_logger.telnetlib3") as mock:
+    with patch("saos.docker.telnet_logger.telnetlib3") as mock:
         yield mock
 
 
@@ -185,7 +185,7 @@ class TestTelnetLogger:
         
         mock_telnetlib3.open_connection = AsyncMock(return_value=(mock_reader, mock_writer))
         
-        with patch("telnet_logger.logging") as mock_logging:
+        with patch("saos.docker.telnet_logger.logging") as mock_logging:
             task = create_task_compat(telnet_logger("127.0.0.1", 5000, shutdown_event))
             await asyncio.sleep(0.2)
             shutdown_event.set()
@@ -310,7 +310,7 @@ class TestTelnetLoggerManager:
 
     def test_start_loggers_creates_thread(self):
         manager = TelnetLoggerManager()
-        with patch("telnet_logger.asyncio"):
+        with patch("saos.docker.telnet_logger.asyncio"):
             manager.start_loggers([5000, 5001])
             assert manager.loop_thread is not None
 

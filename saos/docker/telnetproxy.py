@@ -6,6 +6,7 @@ import socket
 import logging
 import argparse
 import signal
+import inspect
 
 # Python 3.6 compatibility
 if sys.version_info >= (3, 7):
@@ -32,6 +33,7 @@ class RemoteSession:
         self.reconnect_delay = reconnect_delay
         self.queue = asyncio.Queue(maxsize=queue_limit)
         self.closing = False
+        self.close_event = asyncio.Event()
         self.flush_task = None
 
     async def connect(self):
@@ -55,6 +57,17 @@ class RemoteSession:
                 await asyncio.sleep(self.reconnect_delay)
         return False
 
+    async def _reader_at_eof(self):
+        if not self.reader:
+            return True
+        try:
+            at_eof = self.reader.at_eof()
+        except Exception:
+            return False
+        if inspect.isawaitable(at_eof):
+            return await at_eof
+        return bool(at_eof)
+
     async def read_loop(self, callback):
         """Read from remote and send to all clients via callback."""
         # Start the flush queue task once
@@ -67,18 +80,50 @@ class RemoteSession:
                     break
 
             try:
-                # Use heartbeat interval as timeout - if no data, send keepalive
-                data = await asyncio.wait_for(
-                    self.reader.read(1024), 
-                    timeout=self.heartbeat
+                read_task = create_task(self.reader.read(1024))
+                close_task = create_task(self.close_event.wait())
+                done, pending = await asyncio.wait(
+                    {read_task, close_task},
+                    timeout=self.heartbeat,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                
-                if not data or self.reader.at_eof():
-                    log.warning("Remote connection lost - reconnecting...")
-                    await self.cleanup_connection()
+                if close_task in done:
+                    read_task.cancel()
+                    await asyncio.gather(read_task, return_exceptions=True)
+                    break
+                if not done:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    await self.send_heartbeat()
                     continue
-                    
-                await callback(data)
+                if read_task in done:
+                    try:
+                        data = read_task.result()
+                    except asyncio.TimeoutError:
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        await self.send_heartbeat()
+                        continue
+                    except Exception as e:
+                        log.warning(f"Remote read error: {e}")
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        await self.cleanup_connection()
+                        continue
+                    if not data or await self._reader_at_eof():
+                        log.warning("Remote connection lost - reconnecting...")
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        await self.cleanup_connection()
+                        continue
+                    await callback(data)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
             except asyncio.TimeoutError:
                 # No data received within heartbeat interval - probe connection
@@ -155,10 +200,9 @@ class RemoteSession:
 
     async def close(self):
         """Shutdown the remote session completely."""
-        if self.closing:
-            return
-        
-        self.closing = True
+        if not self.closing:
+            self.closing = True
+        self.close_event.set()
         
         # Cancel flush task
         if self.flush_task and not self.flush_task.done():

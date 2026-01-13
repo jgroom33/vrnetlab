@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import datetime
+import json
 import time
 import logging
 import os
@@ -32,6 +33,32 @@ signal.signal(signal.SIGCHLD, handle_SIGCHLD)
 SOFT_ULIMIT_NOFILE = 524288  # from containerlab ulimit on Oracle linux 10
 TRACE_LEVEL_NUM = 9
 logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+BOOTSTRAP_DONE_RE = re.compile(r"\bcore\b.*Bootstrap Done", re.IGNORECASE)
+PROMPT_PATTERNS = [
+    re.compile(rb"BASE-dnx-SIM\??[>#]"),
+    re.compile(rb"[A-Za-z0-9_.@:()~/\-]+\$"),
+    re.compile(rb"[A-Za-z0-9_.@:()~/\-]+\??[>#]"),
+]
+PROMPT_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@:()~/\-]+\??[>#]|[A-Za-z0-9_.@:()~/\-]+\$")
+STATE_ORDER = [
+    "waiting_for_login",
+    "login_available",
+    "bootstrap_done",
+    "config_ready",
+    "config_base_applied",
+    "ssh_ready",
+    "healthy",
+]
+DEFAULT_TIMEOUTS = {
+    "login_available": 300,
+    "bootstrap_done": 120,
+    "config_ready": 300,
+    "config_base_applied": 300,
+    "ssh_ready": 1200,
+    "healthy": 30,
+}
+DEFAULT_PROBE_INTERVAL_S = 5
+DEFAULT_PASSTHROUGH_SSH_GRACE_S = 60
 
 
 def trace(self, message, *args, **kws):
@@ -41,6 +68,98 @@ def trace(self, message, *args, **kws):
 
 
 logging.Logger.trace = trace
+
+
+class SAOSStateTracker:
+    def __init__(
+        self,
+        logger,
+        state_order,
+        timeouts,
+        state_file="/state.json",
+        start_time=None,
+        meta=None,
+    ):
+        self.logger = logger
+        self.state_order = state_order
+        self.timeouts = timeouts
+        self.state_file = state_file
+        self.start_time = start_time
+        self.states = []
+        self.current = None
+        self.timed_out_state = None
+        self.timed_out_at = None
+        self.meta = meta or {}
+
+    def set_state(self, name):
+        if self.current == name:
+            return False
+        ts = datetime.datetime.now()
+        if self.start_time is None:
+            self.start_time = ts
+        self.current = name
+        self.states.append({"name": name, "ts": ts})
+        self._log_state(name, ts)
+        self._write_state()
+        return True
+
+    def check_timeout(self):
+        if self.timed_out_state:
+            return self.timed_out_state
+        if not self.current or self.current not in self.state_order:
+            return None
+        idx = self.state_order.index(self.current)
+        if idx >= len(self.state_order) - 1:
+            return None
+        next_state = self.state_order[idx + 1]
+        timeout_s = self.timeouts.get(next_state)
+        if not timeout_s or timeout_s <= 0:
+            return None
+        prev_ts = self._state_ts(self.current)
+        if prev_ts is None:
+            return None
+        now = datetime.datetime.now()
+        if (now - prev_ts).total_seconds() > timeout_s:
+            self.timed_out_state = next_state
+            self.timed_out_at = now
+            self.logger.error("STATE TIMEOUT %s after %ss", next_state, timeout_s)
+            self._write_state()
+            return next_state
+        return None
+
+    def _state_ts(self, name):
+        for entry in self.states:
+            if entry["name"] == name:
+                return entry["ts"]
+        return None
+
+    def _log_state(self, name, ts):
+        delta_s = None
+        if self.start_time:
+            delta_s = (ts - self.start_time).total_seconds()
+        if delta_s is None:
+            self.logger.info("STATE %s ts=%s", name, ts.isoformat())
+        else:
+            self.logger.info("STATE %s ts=%s delta_s=%.3f", name, ts.isoformat(), delta_s)
+
+    def _write_state(self):
+        payload = {
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "states": [
+                {"name": entry["name"], "ts": entry["ts"].isoformat()}
+                for entry in self.states
+            ],
+            "current": self.current,
+            "timeouts_s": self.timeouts,
+            "timed_out_state": self.timed_out_state,
+            "timed_out_at": self.timed_out_at.isoformat() if self.timed_out_at else None,
+            "meta": self.meta,
+        }
+        try:
+            with open(self.state_file, "w") as fh:
+                json.dump(payload, fh, indent=2)
+        except Exception as exc:
+            self.logger.debug("Failed to write state file: %s", exc)
 
 
 class SAOS_vm(vrnetlab.VM):
@@ -117,7 +236,7 @@ class SAOS_vm(vrnetlab.VM):
         },
     }
 
-    def __init__(self, hostname, username, password, conn_mode):
+    def __init__(self, hostname, username, password, conn_mode, state_tracker=None):
         disk_image = "/"
         for e in os.listdir("/"):
             if re.search(".qcow2$", e):
@@ -153,6 +272,7 @@ class SAOS_vm(vrnetlab.VM):
         self.mgmt_tcp_ports.extend([179, 225, 4243])
 
         self.hostname = hostname
+        self.state_tracker = state_tracker
 
         self.uuid = str(uuid.uuid4())
         self.serial_number = f"SIM{self.uuid}"[0:8]  # create an 8 character serial number
@@ -188,6 +308,13 @@ class SAOS_vm(vrnetlab.VM):
     def bootstrap_spin(self):
         """This function should be called periodically to do work."""
 
+        if self.state_tracker and self.state_tracker.timed_out_state:
+            return
+
+        if self.state_tracker and self.state_tracker.current is None and self.start_time:
+            self.state_tracker.start_time = self.start_time
+            self.state_tracker.set_state("waiting_for_login")
+
         if self.spins > 300:
             # too many spins with no result ->  give up
             self.logger.info("To many spins with no result, restarting")
@@ -200,13 +327,21 @@ class SAOS_vm(vrnetlab.VM):
             if ridx == 0:  # login
                 self.logger.debug("matched login prompt")
                 self.logger.debug("trying to log in with 'diag'")
+                if self.state_tracker:
+                    self.state_tracker.set_state("login_available")
                 self.wait_write("diag", wait=None)
                 self.wait_write("ciena123", wait="Password:")
+                if self._wait_for_prompt(timeout=60, send_newline=True) is None:
+                    self.logger.warning("login did not reach a prompt")
+                    return
                 self.logger.debug("login complete")
 
-                # run config commands
-                if self.mgmt_passthrough:
-                    self.bootstrap_config()
+                if not self.wait_for_bootstrap_done():
+                    self.logger.warning("bootstrap did not complete")
+                    return
+                if not self.apply_base_config():
+                    self.logger.warning("base configuration did not complete")
+                    return
                 self.startup_config()
                 # close telnet connection
                 self.tn.close()
@@ -228,64 +363,368 @@ class SAOS_vm(vrnetlab.VM):
 
         return
 
-    def bootstrap_config(self):
-        """Do the actual bootstrap config"""
-        new_password = False
-        ipv4, subnet = self.mgmt_address_ipv4.split('/')
-        wait_strings = ["BASE-dnx-SIM>", "BASE-dnx-SIM?>"]
+    def _bootstrap_done_in_output(self, output):
+        if not output:
+            return False
+        return BOOTSTRAP_DONE_RE.search(output) is not None
 
-        self.logger.info("applying bootstrap configuration")
-        for i, wait_str in enumerate(wait_strings):
-            op = self.wait_write("show bootstrap-status", wait=wait_str)
-            if "Bootstrap Done" in op:
-                break
+    def _mark_bootstrap_done(self):
+        if self.state_tracker:
+            self.state_tracker.set_state("bootstrap_done")
 
+    def _state_timed_out(self):
+        if not self.state_tracker:
+            return False
+        return self.state_tracker.check_timeout() is not None
+
+    def wait_for_bootstrap_done(self):
         while True:
-            op = self.wait_write("show bootstrap-status", wait=wait_strings[-1])
+            if self._state_timed_out():
+                return False
+            op = self._send_cmd_wait("show bootstrap-status", timeout=60)
+            if self._bootstrap_done_in_output(op):
+                self._mark_bootstrap_done()
+                return True
             time.sleep(5)
-            if "Bootstrap Done" in op:
-                break
 
-        self.wait_write("exit", wait=wait_strings[-1])
+    def _wait_for_login_prompt(self, timeout=60):
+        end = time.time() + timeout
+        while time.time() < end:
+            idx, match, _ = self.tn.expect([b"login:"], timeout=min(5, end - time.time()))
+            if match and idx == 0:
+                return True
+            try:
+                self.tn.write(b"\r")
+            except Exception:
+                pass
+        return False
+
+    def _wait_for_password_prompt(self, timeout=30):
+        end = time.time() + timeout
+        while time.time() < end:
+            idx, match, _ = self.tn.expect([b"Password:"], timeout=min(5, end - time.time()))
+            if match and idx == 0:
+                return True
+            try:
+                self.tn.write(b"\r")
+            except Exception:
+                pass
+        return False
+
+    def _relogin(self, password="ciena123", timeout=60):
+        if not self._wait_for_login_prompt(timeout=timeout):
+            try:
+                self.tn.write(b"exit\r")
+            except Exception:
+                pass
+            if not self._wait_for_login_prompt(timeout=timeout):
+                return False
+
         self.logger.debug("trying to log in with 'diag'")
-        self.wait_write("diag", wait="login:")
-        self.wait_write("ciena123", wait="Password:")
-        self.logger.debug("login completed for bootstrap config")
+        try:
+            self.tn.write(b"diag\r")
+        except Exception:
+            return False
+        if not self._wait_for_password_prompt(timeout=30):
+            return False
+        try:
+            self.tn.write(f"{password}\r".encode())
+        except Exception:
+            return False
+        self.logger.debug("login complete")
+        return self._wait_for_prompt(timeout=60, send_newline=True) is not None
 
-        op = self.wait_write("config", wait=f"{self.variant}>")
+    def _enter_config_mode(self):
+        timeout_s = DEFAULT_TIMEOUTS["config_ready"]
+        if self.state_tracker:
+            timeout_s = self.state_tracker.timeouts.get("config_ready", timeout_s)
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self._state_timed_out():
+                return None
+            op = self._send_cmd_wait("config", timeout=30, settle_s=2)
+            if op is None:
+                if not self._relogin(timeout=30):
+                    return None
+                continue
+            if self._prompt_is_config(op):
+                return op
+            if (
+                "SHELL PARSER FAILURE" in op
+                or "no matching entry found" in op.lower()
+                or self._prompt_is_sim(op)
+            ):
+                self.logger.debug(
+                    "config not available in base CLI; attempting relogin for prompt transition"
+                )
+                if not self._relogin(timeout=30):
+                    return None
+                self._wait_for_non_sim_prompt(timeout=30)
+                continue
+            time.sleep(5)
+        return None
+
+    def apply_base_config(self):
+        """Apply base config for hostname and management passthrough (if enabled)."""
+        new_password = False
+        ipv4 = None
+        subnet = None
+        if self.mgmt_passthrough and not self.mgmt_dhcp:
+            ipv4, subnet = self.mgmt_address_ipv4.split("/")
+
+        self.logger.info("applying base configuration")
+        self._wait_for_prompt(timeout=60, send_newline=True)
+        op = self._enter_config_mode()
+        if self._state_timed_out():
+            return False
+        if op is None:
+            self.logger.debug("config not ready, attempting re-login")
+            if not self._relogin():
+                self.logger.warning("unable to login for base config")
+                return False
+            op = self._enter_config_mode()
+            if self._state_timed_out():
+                return False
+        if op is None:
+            self.logger.warning("unable to enter config mode")
+            return False
         # newer load has the string "password" in the output
-        if "password" in op:
+        if op and "password" in op:
             new_password = True
 
         # newer load requires password change
         if new_password:
-            self.wait_write("system aaa authentication users user diag config password ciena1234")
-            self.logger.debug("trying to log in with 'diag'")
-            self.wait_write("diag", wait="login:")
-            self.wait_write("ciena1234", wait="Password:")
-            self.logger.debug("login completed after password change")
-            self.wait_write("config", wait=f"{self.variant}>")
+            self._send_cmd_wait(
+                "system aaa authentication users user diag config password ciena1234",
+                timeout=60,
+            )
+            if self._state_timed_out():
+                return False
+            if not self._relogin(password="ciena1234"):
+                self.logger.warning("login failed after password change")
+                return False
+            op = self._enter_config_mode()
+            if self._state_timed_out():
+                return False
+            if op is None:
+                self.logger.warning("unable to enter config mode after password change")
+                return False
             # change password back to default password
-            self.wait_write("system aaa authentication users user diag config password ciena123")
+            self._send_cmd_wait(
+                "system aaa authentication users user diag config password ciena123",
+                timeout=60,
+            )
+            if self._state_timed_out():
+                return False
 
-        self.wait_write(f"system config hostname {self.hostname}")
-        self.wait_write("dhcp-client client mgmtbr0 admin-enable false")
-        self.wait_write(f"oc-if:interfaces interface mgmtbr0 ipv4 addresses address {ipv4} config ip {ipv4} prefix-length {subnet}")
-        self.wait_write(f"rib vrf default ipv4 0.0.0.0/0 next-hop {re.sub(r'\d+$', '1', ipv4)}")
-        self.wait_write("exit")
-        self.wait_write("exit")
-        self.wait_write("exit")
-        self.wait_write("exit")
+        if self.state_tracker:
+            self.state_tracker.set_state("config_ready")
+
+        base_ok = True
+        if self._send_cmd_wait(f"system config hostname {self.hostname}", timeout=60) is None:
+            base_ok = False
+        if self._state_timed_out():
+            return False
+        if ipv4 and subnet:
+            if self._send_cmd_wait(
+                "dhcp-client client mgmtbr0 admin-enable false", timeout=60
+            ) is None:
+                base_ok = False
+            if self._state_timed_out():
+                return False
+            if self._send_cmd_wait(
+                f"oc-if:interfaces interface mgmtbr0 ipv4 addresses address {ipv4} "
+                f"config ip {ipv4} prefix-length {subnet}",
+                timeout=60,
+            ) is None:
+                base_ok = False
+            if self._state_timed_out():
+                return False
+            if self._send_cmd_wait(
+                f"rib vrf default ipv4 0.0.0.0/0 next-hop {re.sub(r'\d+$', '1', ipv4)}",
+                timeout=60,
+            ) is None:
+                base_ok = False
+            if self._state_timed_out():
+                return False
+        if not self._exit_to_oper(timeout=30, max_exits=8):
+            base_ok = False
+        if not base_ok:
+            self.logger.warning("base configuration did not complete")
+            return False
+        if self.state_tracker:
+            self.state_tracker.set_state("config_base_applied")
+        return True
 
     def startup_config(self):
         """Load additional config provided by user."""
         return
 
+    def _wait_for_prompt(self, timeout=30, send_newline=False):
+        if send_newline:
+            try:
+                self.tn.write(b"\r")
+            except Exception:
+                pass
+        end = time.time() + timeout
+        buffer = b""
+        while time.time() < end:
+            remaining = max(1, int(end - time.time()))
+            idx, match, data = self.tn.expect(PROMPT_PATTERNS, timeout=min(5, remaining))
+            if data:
+                buffer += data
+            if match:
+                return buffer.decode(errors="ignore")
+        return buffer.decode(errors="ignore") if buffer else None
+
+    def _wait_for_prompt_settled(self, timeout=30, settle_s=1.0):
+        end = time.time() + timeout
+        buffer = b""
+        matched = False
+        while time.time() < end:
+            remaining = max(1, int(end - time.time()))
+            idx, match, data = self.tn.expect(PROMPT_PATTERNS, timeout=min(5, remaining))
+            if data:
+                buffer += data
+            if match:
+                matched = True
+                settle_end = min(end, time.time() + settle_s)
+                while time.time() < settle_end:
+                    wait = max(0.1, min(0.5, settle_end - time.time()))
+                    idx2, match2, data2 = self.tn.expect(PROMPT_PATTERNS, timeout=wait)
+                    if data2:
+                        buffer += data2
+                        settle_end = min(end, time.time() + settle_s)
+                    if match2:
+                        settle_end = min(end, time.time() + settle_s)
+                break
+        if not matched:
+            return None
+        return buffer.decode(errors="ignore") if buffer else None
+
+    def _last_prompt(self, output):
+        if not output:
+            return None
+        for line in reversed(output.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            last = None
+            for match in PROMPT_TOKEN_RE.finditer(line):
+                last = match.group(0)
+            if last:
+                return last
+        return None
+
+    def _prompt_is_config(self, output):
+        prompt = self._last_prompt(output)
+        return bool(prompt and prompt.endswith("#"))
+
+    def _prompt_is_oper(self, output):
+        prompt = self._last_prompt(output)
+        if not prompt:
+            return False
+        return prompt.endswith(">") or prompt.endswith("$")
+
+    def _prompt_is_sim(self, output):
+        prompt = self._last_prompt(output)
+        return bool(prompt and prompt.startswith("BASE-dnx-SIM"))
+
+    def _wait_for_non_sim_prompt(self, timeout=120):
+        end = time.time() + timeout
+        last_prompt = None
+        while time.time() < end:
+            output = self._wait_for_prompt(timeout=10, send_newline=True)
+            if output:
+                prompt = self._last_prompt(output)
+                if prompt and prompt != last_prompt:
+                    self.logger.debug("observed prompt: %s", prompt)
+                    last_prompt = prompt
+                if prompt and not prompt.startswith("BASE-dnx-SIM"):
+                    return True
+            if self._state_timed_out():
+                return False
+            time.sleep(2)
+        return False
+
+    def _exit_to_oper(self, timeout=30, max_exits=8):
+        for _ in range(max_exits):
+            op = self._send_cmd_wait("exit", timeout=timeout, settle_s=2)
+            if self._state_timed_out():
+                return False
+            if op and self._prompt_is_oper(op):
+                return True
+        op = self._wait_for_prompt(timeout=timeout, send_newline=True)
+        if op and self._prompt_is_oper(op):
+            return True
+        return False
+
+    def _send_cmd_wait(self, cmd, timeout=30, settle_s=0):
+        self.logger.debug("writing to serial console: '%s'", cmd)
+        try:
+            self.tn.read_very_eager()
+        except Exception:
+            pass
+        self.tn.write(f"{cmd}\r".encode())
+        if settle_s > 0:
+            output = self._wait_for_prompt_settled(timeout=timeout, settle_s=settle_s)
+        else:
+            output = self._wait_for_prompt(timeout=timeout, send_newline=False)
+        if output is None:
+            output = self._wait_for_prompt(timeout=10, send_newline=True)
+        return output
+
 
 class SAOS(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
         super().__init__(username, password)
-        self.vms = [SAOS_vm(hostname, username, password, conn_mode)]
+        self.health_mode = os.environ.get("SAOS_HEALTH_MODE", "strict").lower()
+        if self.health_mode not in ("strict", "progressive"):
+            self.logger.warning(
+                "Invalid SAOS_HEALTH_MODE=%s, defaulting to strict",
+                self.health_mode,
+            )
+            self.health_mode = "strict"
+
+        self.state_timeouts = {
+            "login_available": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_LOGIN_S", DEFAULT_TIMEOUTS["login_available"]
+            ),
+            "bootstrap_done": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_BOOTSTRAP_S", DEFAULT_TIMEOUTS["bootstrap_done"]
+            ),
+            "config_ready": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_CONFIG_S", DEFAULT_TIMEOUTS["config_ready"]
+            ),
+            "config_base_applied": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_BASE_CONFIG_S",
+                DEFAULT_TIMEOUTS["config_base_applied"],
+            ),
+            "ssh_ready": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_SSH_S", DEFAULT_TIMEOUTS["ssh_ready"]
+            ),
+            "healthy": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_HEALTHY_S", DEFAULT_TIMEOUTS["healthy"]
+            ),
+        }
+        self.state_tracker = SAOSStateTracker(
+            self.logger,
+            state_order=STATE_ORDER,
+            timeouts=self.state_timeouts,
+            state_file="/state.json",
+            meta={"health_mode": self.health_mode},
+        )
+        self.ssh_successes = 0
+        self.last_probe = 0.0
+        self.probe_interval = self._read_timeout_env(
+            "SAOS_STATE_PROBE_INTERVAL_S", DEFAULT_PROBE_INTERVAL_S
+        )
+        self.passthrough_ssh_grace_s = self._read_timeout_env(
+            "SAOS_PASSTHROUGH_SSH_GRACE_S", DEFAULT_PASSTHROUGH_SSH_GRACE_S
+        )
+        self.passthrough_ready_since = None
+
+        self.vms = [SAOS_vm(hostname, username, password, conn_mode, self.state_tracker)]
 
         try:
             soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -298,6 +737,126 @@ class SAOS(vrnetlab.VR):
             self.logger.warning(f"Permission denied when setting ulimit -n: {pe}")
         except Exception as e:
             self.logger.warning(f"Unexpected error setting ulimit -n: {e}")
+
+    def _read_timeout_env(self, name, default):
+        value = os.environ.get(name)
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            self.logger.warning("Invalid %s=%s, using default %s", name, value, default)
+            return default
+
+    def _probe_port(self, host, port, timeout=1):
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+            sock.close()
+            return True
+        except Exception:
+            return False
+
+    def _resolve_mgmt_ip(self):
+        if not self.vms[0].mgmt_passthrough:
+            return "127.0.0.1"
+        ip_cidr = self.vms[0].mgmt_address_ipv4
+        if not ip_cidr or ip_cidr == "dhcp":
+            try:
+                ip_cidr, _ = self.vms[0].get_mgmt_address()
+            except Exception:
+                return None
+        if not ip_cidr or ip_cidr == "dhcp":
+            return None
+        return ip_cidr.split("/")[0]
+
+    def _check_ssh_ready(self):
+        if self.vms[0].mgmt_passthrough:
+            if self.passthrough_ready_since is None:
+                self.passthrough_ready_since = time.monotonic()
+            elif time.monotonic() - self.passthrough_ready_since >= self.passthrough_ssh_grace_s:
+                self.ssh_successes = 2
+                self.state_tracker.set_state("ssh_ready")
+            return
+        now = time.monotonic()
+        if now - self.last_probe < self.probe_interval:
+            return
+        self.last_probe = now
+        target_ip = self._resolve_mgmt_ip()
+        if not target_ip:
+            return
+        ssh_ok = self._probe_port(target_ip, 22)
+        if ssh_ok:
+            self.ssh_successes += 1
+        else:
+            self.ssh_successes = 0
+        if self.ssh_successes >= 2:
+            self.state_tracker.set_state("ssh_ready")
+
+    def _update_health(self):
+        if self.state_tracker.timed_out_state:
+            self.update_health(
+                1, f"unhealthy:timeout:{self.state_tracker.timed_out_state}"
+            )
+            return
+        current = self.state_tracker.current
+        if not current:
+            self.update_health(1, "starting")
+            return
+        if self.health_mode == "progressive":
+            if current == "healthy":
+                self.update_health(0, "healthy")
+            else:
+                self.update_health(0, f"healthy:{current}")
+            return
+        if current == "healthy":
+            self.update_health(0, "healthy")
+        else:
+            self.update_health(1, f"starting:{current}")
+
+    def start(self):
+        while True:
+            for vm in self.vms:
+                vm.work()
+
+            if self.state_tracker.current is None:
+                vm_start = self.vms[0].start_time
+                if vm_start:
+                    self.state_tracker.start_time = vm_start
+                    self.state_tracker.set_state("waiting_for_login")
+
+            self.state_tracker.check_timeout()
+
+            if self.state_tracker.current == "config_base_applied":
+                self._check_ssh_ready()
+            if self.state_tracker.current == "ssh_ready":
+                self.state_tracker.set_state("healthy")
+
+            self._update_health()
+
+            if os.path.exists("/reset"):
+                with open("/reset", "rt") as f:
+                    fcontent = f.read().strip()
+                vm_num_list = fcontent.split(",")
+                for vm in self.vms:
+                    if (str(vm.num) in vm_num_list) or not fcontent:
+                        try:
+                            if vm.use_scrapli:
+                                vm.scrapli_qm.channel.write("system_reset\r")
+                            else:
+                                vm.qm.write("system_reset\r".encode())
+                            self.logger.debug(
+                                f"Sent qemu-monitor system_reset to VM num {vm.num} "
+                            )
+                        except Exception as e:
+                            self.logger.error(
+                                f"Failed to send qemu-monitor system_reset to VM num {vm.num} ({e})"
+                            )
+                try:
+                    os.remove("/reset")
+                except Exception as e:
+                    self.logger.error(
+                        f"Failed to cleanup /reset file({e}). qemu-monitor system_reset will likely be triggered again on VMs"
+                    )
 
 
 if __name__ == "__main__":

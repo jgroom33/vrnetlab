@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import telnetlib3
 import asyncio
+import inspect
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -143,10 +144,16 @@ class TelnetLoggerManager:
             
             try:
                 # Create tasks for each port
-                self.tasks = [
-                    self.loop.create_task(telnet_logger(host, port, self.shutdown_event))
-                    for port in ports
-                ]
+                self.tasks = []
+                for port in ports:
+                    coro = telnet_logger(host, port, self.shutdown_event)
+                    task = self.loop.create_task(coro)
+                    if inspect.isawaitable(task):
+                        self.tasks.append(task)
+                    else:
+                        coro.close()
+                if not self.tasks:
+                    return
                 
                 # Run until shutdown
                 self.loop.run_until_complete(asyncio.gather(*self.tasks, return_exceptions=True))
