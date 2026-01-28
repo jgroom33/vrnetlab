@@ -47,6 +47,7 @@ STATE_ORDER = [
     "config_ready",
     "config_base_applied",
     "ssh_ready",
+    "startup_partial_applied",
     "healthy",
 ]
 DEFAULT_TIMEOUTS = {
@@ -55,10 +56,12 @@ DEFAULT_TIMEOUTS = {
     "config_ready": 300,
     "config_base_applied": 300,
     "ssh_ready": 1200,
+    "startup_partial_applied": 300,
     "healthy": 30,
 }
 DEFAULT_PROBE_INTERVAL_S = 5
 DEFAULT_PASSTHROUGH_SSH_GRACE_S = 60
+DEFAULT_STARTUP_PARTIAL_RETRY_S = 15
 
 
 def trace(self, message, *args, **kws):
@@ -703,6 +706,10 @@ class SAOS(vrnetlab.VR):
             "ssh_ready": self._read_timeout_env(
                 "SAOS_STATE_TIMEOUT_SSH_S", DEFAULT_TIMEOUTS["ssh_ready"]
             ),
+            "startup_partial_applied": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_PARTIAL_S",
+                DEFAULT_TIMEOUTS["startup_partial_applied"],
+            ),
             "healthy": self._read_timeout_env(
                 "SAOS_STATE_TIMEOUT_HEALTHY_S", DEFAULT_TIMEOUTS["healthy"]
             ),
@@ -723,6 +730,16 @@ class SAOS(vrnetlab.VR):
             "SAOS_PASSTHROUGH_SSH_GRACE_S", DEFAULT_PASSTHROUGH_SSH_GRACE_S
         )
         self.passthrough_ready_since = None
+        self.startup_partial_config_path = os.environ.get("SAOS_STARTUP_CONFIG_PATH")
+        self.startup_partial_retry_s = self._read_timeout_env(
+            "SAOS_STARTUP_PARTIAL_RETRY_S", DEFAULT_STARTUP_PARTIAL_RETRY_S
+        )
+        self.startup_partial_last_attempt = 0.0
+        self.startup_partial_applied = False
+        self.startup_partial_config_loaded = False
+        self.startup_partial_config = None
+        self.startup_partial_config_kind = None
+        self.startup_partial_error = None
 
         self.vms = [SAOS_vm(hostname, username, password, conn_mode, self.state_tracker)]
 
@@ -768,6 +785,250 @@ class SAOS(vrnetlab.VR):
         if not ip_cidr or ip_cidr == "dhcp":
             return None
         return ip_cidr.split("/")[0]
+
+    def _discover_startup_partial_config_path(self):
+        config_dir = "/config"
+        try:
+            entries = os.listdir(config_dir)
+        except Exception:
+            return None
+        candidates = [
+            name for name in entries if ".partial" in name.lower()
+        ]
+        if not candidates:
+            return None
+        candidates.sort()
+        if len(candidates) > 1:
+            self.logger.warning(
+                "Multiple partial configs found in %s; using %s",
+                config_dir,
+                candidates[0],
+            )
+        return os.path.join(config_dir, candidates[0])
+
+    def _load_startup_partial_config(self):
+        if self.startup_partial_config_loaded:
+            return self.startup_partial_config
+        self.startup_partial_config_loaded = True
+        if not self.startup_partial_config_path:
+            self.startup_partial_config_path = self._discover_startup_partial_config_path()
+        if not self.startup_partial_config_path:
+            return None
+        if ".partial" not in os.path.basename(self.startup_partial_config_path).lower():
+            self.startup_partial_error = (
+                f"startup-config must be partial: {self.startup_partial_config_path}"
+            )
+            self.logger.error(self.startup_partial_error)
+            return None
+        if not os.path.exists(self.startup_partial_config_path):
+            return None
+        try:
+            with open(self.startup_partial_config_path, "r") as fh:
+                content = fh.read().strip()
+        except Exception as exc:
+            self.startup_partial_error = f"read failed: {exc}"
+            self.logger.warning(
+                "Failed to read startup config %s: %s",
+                self.startup_partial_config_path,
+                exc,
+            )
+            return None
+        if not content:
+            return None
+        self.startup_partial_config = content
+        self.startup_partial_config_kind = self._detect_startup_partial_config_kind(content)
+        return content
+
+    def _detect_startup_partial_config_kind(self, config):
+        if re.match(r"^\s*<", config):
+            return "netconf"
+        return "cli"
+
+    def _prepare_netconf_config(self, config):
+        stripped = config.strip()
+        if re.match(r"^\s*<config[^>]*>.*</config>\s*$", stripped, re.DOTALL):
+            return stripped
+        return f"<config>{stripped}</config>"
+
+    def _prepare_cli_config(self, config):
+        lines = []
+        for raw in config.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#") or line.startswith("!"):
+                continue
+            if line.lower() in ("config", "configure"):
+                continue
+            lines.append(line)
+        return lines
+
+    def _cli_prompt_pattern(self):
+        return r"^\S+\??[>#]\s*$|^\S+\$\s*$"
+
+    def _cli_output_failed(self, output):
+        if not output:
+            return True
+        lower = output.lower()
+        return (
+            "shell parser failure" in lower
+            or "no matching entry found" in lower
+            or "% error" in lower
+        )
+
+    def _apply_startup_partial_config_cli(self, config):
+        target_ip = self._resolve_mgmt_ip()
+        if not target_ip:
+            return False
+        if not self._probe_port(target_ip, 22):
+            return False
+        try:
+            from scrapli.driver.generic import GenericDriver
+        except Exception as exc:
+            self.startup_partial_error = f"cli driver unavailable: {exc}"
+            self.logger.error("CLI driver unavailable: %s", exc)
+            return False
+        driver = None
+        try:
+            driver_kwargs = {
+                "host": target_ip,
+                "port": 22,
+                "auth_username": self.vms[0].username,
+                "auth_password": self.vms[0].password,
+                "auth_strict_key": False,
+                "transport": "system",
+                "timeout_socket": 60,
+                "timeout_transport": 60,
+                "timeout_ops": 60,
+                "comms_prompt_pattern": self._cli_prompt_pattern(),
+            }
+            try:
+                driver = GenericDriver(**driver_kwargs)
+            except TypeError:
+                driver_kwargs.pop("transport", None)
+                driver_kwargs.pop("comms_prompt_pattern", None)
+                try:
+                    driver = GenericDriver(**driver_kwargs)
+                except TypeError:
+                    driver_kwargs.pop("timeout_socket", None)
+                    driver_kwargs.pop("timeout_transport", None)
+                    driver_kwargs.pop("timeout_ops", None)
+                    driver = GenericDriver(**driver_kwargs)
+            driver.open()
+            response = driver.send_command("config", timeout_ops=60)
+            if self._cli_output_failed(response.result):
+                self.logger.warning("CLI apply failed: unable to enter config mode")
+                return False
+            lines = self._prepare_cli_config(config)
+            if not lines:
+                self.logger.info("CLI startup partial config empty, skipping")
+                return True
+            for line in lines:
+                response = driver.send_command(line, timeout_ops=60)
+                if self._cli_output_failed(response.result):
+                    self.logger.warning("CLI apply failed on command: %s", line)
+                    return False
+            for _ in range(3):
+                driver.send_command("exit", timeout_ops=30)
+        finally:
+            if driver is not None:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+        self.logger.info("Startup partial config applied via CLI")
+        return True
+
+    def _apply_startup_partial_config(self):
+        if self.startup_partial_applied:
+            return True
+        if self.startup_partial_error:
+            return False
+        config = self._load_startup_partial_config()
+        if not config:
+            self.startup_partial_applied = True
+            return True
+        now = time.monotonic()
+        if now - self.startup_partial_last_attempt < self.startup_partial_retry_s:
+            return False
+        self.startup_partial_last_attempt = now
+        if self.startup_partial_config_kind == "cli":
+            if self._apply_startup_partial_config_cli(config):
+                self.startup_partial_applied = True
+                return True
+            return False
+        target_ip = self._resolve_mgmt_ip()
+        if not target_ip:
+            return False
+        if not self._probe_port(target_ip, 830):
+            return False
+        netconf_import_error = None
+        try:
+            from scrapli_netconf.driver import NetconfDriver
+        except Exception as exc:
+            netconf_import_error = exc
+            try:
+                from scrapli.driver.netconf import NetconfDriver
+            except Exception as exc2:
+                self.startup_partial_error = (
+                    f"netconf driver unavailable: {exc2}"
+                )
+                if netconf_import_error:
+                    self.logger.error(
+                        "NETCONF driver unavailable: %s; fallback error: %s",
+                        netconf_import_error,
+                        exc2,
+                    )
+                else:
+                    self.logger.error("NETCONF driver unavailable: %s", exc2)
+                return False
+        driver = None
+        try:
+            driver_kwargs = {
+                "host": target_ip,
+                "port": 830,
+                "auth_username": self.vms[0].username,
+                "auth_password": self.vms[0].password,
+                "auth_strict_key": False,
+                "transport": "system",
+                "timeout_socket": 60,
+                "timeout_transport": 60,
+                "timeout_ops": 60,
+                "preferred_netconf_version": "1.0",
+            }
+            try:
+                driver = NetconfDriver(**driver_kwargs)
+            except TypeError:
+                driver_kwargs.pop("transport", None)
+                driver_kwargs.pop("preferred_netconf_version", None)
+                try:
+                    driver = NetconfDriver(**driver_kwargs)
+                except TypeError:
+                    driver_kwargs.pop("timeout_socket", None)
+                    driver_kwargs.pop("timeout_transport", None)
+                    driver_kwargs.pop("timeout_ops", None)
+                    driver = NetconfDriver(**driver_kwargs)
+            driver.open()
+            response = driver.edit_config(
+                config=self._prepare_netconf_config(config),
+                target="running",
+            )
+            if getattr(response, "failed", False):
+                result = getattr(response, "result", "")
+                self.logger.error("NETCONF edit-config failed: %s", result)
+                return False
+        except Exception as exc:
+            self.logger.warning("NETCONF apply failed: %s", exc)
+            return False
+        finally:
+            if driver is not None:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+        self.logger.info("Startup partial config applied via NETCONF")
+        self.startup_partial_applied = True
+        return True
 
     def _check_ssh_ready(self):
         if self.vms[0].mgmt_passthrough:
@@ -829,6 +1090,9 @@ class SAOS(vrnetlab.VR):
             if self.state_tracker.current == "config_base_applied":
                 self._check_ssh_ready()
             if self.state_tracker.current == "ssh_ready":
+                if self._apply_startup_partial_config():
+                    self.state_tracker.set_state("startup_partial_applied")
+            if self.state_tracker.current == "startup_partial_applied":
                 self.state_tracker.set_state("healthy")
 
             self._update_health()
