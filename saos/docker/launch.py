@@ -69,13 +69,13 @@ DEFAULT_TIMEOUTS = {
     "config_ready": 300,
     "config_base_applied": 900,
     "ssh_ready": 1200,
-    "startup_partial_applied": 300,
+    "startup_partial_applied": 600,
     "healthy": 30,
 }
 DEFAULT_PROBE_INTERVAL_S = 5
 DEFAULT_PASSTHROUGH_SSH_GRACE_S = 60
 DEFAULT_STARTUP_PARTIAL_RETRY_S = 15
-DEFAULT_NEW_PASSWORD = os.environ.get("SAOS_NEW_PASSWORD", "ciena123")
+DEFAULT_NEW_PASSWORD = os.environ.get("SAOS_NEW_PASSWORD", "Ciena123!")
 DEFAULT_PASSWORD_BOOTSTRAP_TIMEOUT = int(
     os.environ.get("SAOS_STATE_TIMEOUT_BOOTSTRAP_PASSWORD_S", "300")
 )
@@ -117,6 +117,21 @@ class SAOSStateTracker:
         ts = datetime.datetime.now()
         if self.start_time is None:
             self.start_time = ts
+        if self.timed_out_state:
+            timed_out_idx = self._state_index(self.timed_out_state)
+            new_idx = self._state_index(name)
+            if (
+                timed_out_idx is not None
+                and new_idx is not None
+                and new_idx >= timed_out_idx
+            ):
+                self.logger.info(
+                    "STATE TIMEOUT CLEARED %s recovered at state=%s",
+                    self.timed_out_state,
+                    name,
+                )
+                self.timed_out_state = None
+                self.timed_out_at = None
         self.current = name
         self.states.append({"name": name, "ts": ts})
         self._log_state(name, ts)
@@ -152,6 +167,12 @@ class SAOSStateTracker:
             if entry["name"] == name:
                 return entry["ts"]
         return None
+
+    def _state_index(self, name):
+        try:
+            return self.state_order.index(name)
+        except ValueError:
+            return None
 
     def _log_state(self, name, ts):
         delta_s = None
