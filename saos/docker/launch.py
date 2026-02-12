@@ -363,10 +363,6 @@ class SAOS_vm(vrnetlab.VM):
     def bootstrap_spin(self):
         """This function should be called periodically to do work."""
 
-        if self.state_tracker and self.state_tracker.timed_out_state:
-            if not self._health_mode_progressive():
-                return
-
         if self.spins > 300:
             # too many spins with no result ->  give up
             self.logger.info("To many spins with no result, restarting")
@@ -396,14 +392,9 @@ class SAOS_vm(vrnetlab.VM):
                 self.logger.debug("login complete")
 
                 if not self.wait_for_bootstrap_done():
-                    health_mode = os.environ.get("SAOS_HEALTH_MODE", "strict").lower()
-                    if health_mode == "progressive":
-                        self.logger.warning(
-                            "bootstrap did not complete; continuing in progressive mode"
-                        )
-                    else:
-                        self.logger.warning("bootstrap did not complete")
-                        return
+                    self.logger.warning(
+                        "bootstrap did not complete; continuing with recovery flow"
+                    )
                 if not self.apply_base_config():
                     self.logger.warning("base configuration did not complete")
                     return
@@ -436,9 +427,6 @@ class SAOS_vm(vrnetlab.VM):
     def _mark_bootstrap_done(self):
         if self.state_tracker:
             self.state_tracker.set_state("bootstrap_done")
-
-    def _health_mode_progressive(self):
-        return os.environ.get("SAOS_HEALTH_MODE", "strict").lower() == "progressive"
 
     def _state_timed_out(self):
         if not self.state_tracker:
@@ -988,13 +976,6 @@ class SAOS_vm(vrnetlab.VM):
 class SAOS(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
         super().__init__(username, password)
-        self.health_mode = os.environ.get("SAOS_HEALTH_MODE", "strict").lower()
-        if self.health_mode not in ("strict", "progressive"):
-            self.logger.warning(
-                "Invalid SAOS_HEALTH_MODE=%s, defaulting to strict",
-                self.health_mode,
-            )
-            self.health_mode = "strict"
 
         state_timeouts = {
             "login_available": self._read_timeout_env(
@@ -1026,7 +1007,6 @@ class SAOS(vrnetlab.VR):
             state_order=STATE_ORDER,
             timeouts=state_timeouts,
             state_file="/state.json",
-            meta={"health_mode": self.health_mode},
         )
         self.ssh_successes = 0
         self.ssh_probe_failures = 0
@@ -1483,12 +1463,6 @@ class SAOS(vrnetlab.VR):
         current = self.state_tracker.current
         if not current:
             self.update_health(1, "starting")
-            return
-        if self.health_mode == "progressive":
-            if current == "healthy":
-                self.update_health(0, "healthy")
-            else:
-                self.update_health(0, f"healthy:{current}")
             return
         if current == "healthy":
             self.update_health(0, "healthy")
