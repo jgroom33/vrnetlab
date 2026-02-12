@@ -140,7 +140,12 @@ class RemoteSession:
         if not self.writer:
             return
         try:
-            self.writer.write(self.IAC + self.NOP)
+            if hasattr(self.writer, "iac"):
+                self.writer.iac(self.NOP)
+            elif hasattr(self.writer, "send_iac"):
+                self.writer.send_iac(self.IAC + self.NOP)
+            else:
+                self.writer.write("\r")
             await asyncio.wait_for(self.writer.drain(), timeout=10)
             log.debug("Sent remote heartbeat (IAC NOP)")
         except Exception as e:
@@ -308,7 +313,12 @@ class TelnetManager:
                     await asyncio.sleep(self.heartbeat)
                     if writer.is_closing():
                         break
-                    writer.write(self.IAC + self.NOP)
+                    if hasattr(writer, "iac"):
+                        writer.iac(self.NOP)
+                    elif hasattr(writer, "send_iac"):
+                        writer.send_iac(self.IAC + self.NOP)
+                    else:
+                        writer.write("\r")
                     await asyncio.wait_for(writer.drain(), timeout=5)
                     log.debug(f"Sent keepalive to client {peer}")
             except asyncio.CancelledError:
