@@ -21,12 +21,12 @@ from pathlib import Path
 import glob
 import os
 
-# Add current directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root))
 
 import telnetlib3
-from telnet_logger import start_telnet_loggers
-from telnetproxy import ConnectionMuxer
+from saos.docker.telnet_logger import start_telnet_loggers
+from saos.docker.telnetproxy import ConnectionMuxer
 
 LOG_FORMAT = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)

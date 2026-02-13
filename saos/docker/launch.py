@@ -34,10 +34,23 @@ SOFT_ULIMIT_NOFILE = 524288  # from containerlab ulimit on Oracle linux 10
 TRACE_LEVEL_NUM = 9
 logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
 BOOTSTRAP_DONE_RE = re.compile(r"\bcore\b.*Bootstrap Done", re.IGNORECASE)
+PASSWORD_BANNER_RE = re.compile(
+    r"command execution and configuration are disabled until a new\s+password is configured",
+    re.IGNORECASE | re.DOTALL,
+)
+EULA_BANNER_RE = re.compile(r"this special eula", re.IGNORECASE)
+LIMITED_MODE_RE = re.compile(
+    r"lost connection to netconf server|entering limited mode", re.IGNORECASE
+)
 PROMPT_PATTERNS = [
     re.compile(rb"BASE-dnx-SIM\??[>#]"),
     re.compile(rb"[A-Za-z0-9_.@:()~/\-]+\$"),
     re.compile(rb"[A-Za-z0-9_.@:()~/\-]+\??[>#]"),
+]
+PAGER_PATTERNS = [
+    re.compile(rb"Enter:next line; Space:next page;", re.IGNORECASE),
+    re.compile(rb"--More--"),
+    re.compile(rb"Q:quit", re.IGNORECASE),
 ]
 PROMPT_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@:()~/\-]+\??[>#]|[A-Za-z0-9_.@:()~/\-]+\$")
 STATE_ORDER = [
@@ -52,16 +65,20 @@ STATE_ORDER = [
 ]
 DEFAULT_TIMEOUTS = {
     "login_available": 300,
-    "bootstrap_done": 120,
+    "bootstrap_done": 300,
     "config_ready": 300,
-    "config_base_applied": 300,
+    "config_base_applied": 900,
     "ssh_ready": 1200,
-    "startup_partial_applied": 300,
+    "startup_partial_applied": 600,
     "healthy": 30,
 }
 DEFAULT_PROBE_INTERVAL_S = 5
 DEFAULT_PASSTHROUGH_SSH_GRACE_S = 60
 DEFAULT_STARTUP_PARTIAL_RETRY_S = 15
+DEFAULT_NEW_PASSWORD = os.environ.get("SAOS_NEW_PASSWORD", "Ciena123!")
+DEFAULT_PASSWORD_BOOTSTRAP_TIMEOUT = int(
+    os.environ.get("SAOS_STATE_TIMEOUT_BOOTSTRAP_PASSWORD_S", "300")
+)
 
 
 def trace(self, message, *args, **kws):
@@ -100,6 +117,21 @@ class SAOSStateTracker:
         ts = datetime.datetime.now()
         if self.start_time is None:
             self.start_time = ts
+        if self.timed_out_state:
+            timed_out_idx = self._state_index(self.timed_out_state)
+            new_idx = self._state_index(name)
+            if (
+                timed_out_idx is not None
+                and new_idx is not None
+                and new_idx >= timed_out_idx
+            ):
+                self.logger.info(
+                    "STATE TIMEOUT CLEARED %s recovered at state=%s",
+                    self.timed_out_state,
+                    name,
+                )
+                self.timed_out_state = None
+                self.timed_out_at = None
         self.current = name
         self.states.append({"name": name, "ts": ts})
         self._log_state(name, ts)
@@ -136,6 +168,12 @@ class SAOSStateTracker:
                 return entry["ts"]
         return None
 
+    def _state_index(self, name):
+        try:
+            return self.state_order.index(name)
+        except ValueError:
+            return None
+
     def _log_state(self, name, ts):
         delta_s = None
         if self.start_time:
@@ -163,6 +201,21 @@ class SAOSStateTracker:
                 json.dump(payload, fh, indent=2)
         except Exception as exc:
             self.logger.debug("Failed to write state file: %s", exc)
+
+    def reset_state_timer(self, name=None):
+        target = name or self.current
+        if not target:
+            return False
+        now = datetime.datetime.now()
+        for entry in self.states:
+            if entry["name"] == target:
+                entry["ts"] = now
+                self.timed_out_state = None
+                self.timed_out_at = None
+                self._write_state()
+                self.logger.info("STATE %s timer reset ts=%s", target, now.isoformat())
+                return True
+        return False
 
 
 class SAOS_vm(vrnetlab.VM):
@@ -276,6 +329,8 @@ class SAOS_vm(vrnetlab.VM):
 
         self.hostname = hostname
         self.state_tracker = state_tracker
+        self.new_password = DEFAULT_NEW_PASSWORD
+        self.password_changed = False
 
         self.uuid = str(uuid.uuid4())
         self.serial_number = f"SIM{self.uuid}"[0:8]  # create an 8 character serial number
@@ -294,8 +349,6 @@ class SAOS_vm(vrnetlab.VM):
                 "order=c",
                 "-bios",
                 "/usr/share/OVMF/OVMF_CODE.fd",
-                "-uuid",
-                f"{self.uuid}",
                 "-net",
                 "none",
             ]
@@ -306,17 +359,9 @@ class SAOS_vm(vrnetlab.VM):
             f"type=11,value=hostname:clab,value=mgmtMac:0,value=vmname:clab-{self.hostname}," +
             f"value=is-sim:true,value=locationId:0,value=jsonData:{{\\\"variant\\\":\\\"CN{self.variant}\\\"}}",
         ]
-        self.hostname = hostname
 
     def bootstrap_spin(self):
         """This function should be called periodically to do work."""
-
-        if self.state_tracker and self.state_tracker.timed_out_state:
-            return
-
-        if self.state_tracker and self.state_tracker.current is None and self.start_time:
-            self.state_tracker.start_time = self.start_time
-            self.state_tracker.set_state("waiting_for_login")
 
         if self.spins > 300:
             # too many spins with no result ->  give up
@@ -333,15 +378,23 @@ class SAOS_vm(vrnetlab.VM):
                 if self.state_tracker:
                     self.state_tracker.set_state("login_available")
                 self.wait_write("diag", wait=None)
-                self.wait_write("ciena123", wait="Password:")
-                if self._wait_for_prompt(timeout=60, send_newline=True) is None:
+                self.wait_write(self.password, wait="Password:")
+                output = self._wait_for_prompt(timeout=60, send_newline=True)
+                if output is None:
                     self.logger.warning("login did not reach a prompt")
                     return
+                if not self._login_reached_prompt(output):
+                    self.logger.warning("login failed or prompt not reached")
+                    return
+                if self._password_change_required(output):
+                    if not self._handle_password_change_banner():
+                        return
                 self.logger.debug("login complete")
 
                 if not self.wait_for_bootstrap_done():
-                    self.logger.warning("bootstrap did not complete")
-                    return
+                    self.logger.warning(
+                        "bootstrap did not complete; continuing with recovery flow"
+                    )
                 if not self.apply_base_config():
                     self.logger.warning("base configuration did not complete")
                     return
@@ -380,11 +433,146 @@ class SAOS_vm(vrnetlab.VM):
             return False
         return self.state_tracker.check_timeout() is not None
 
+    def _extend_state_timeout(self, key, minimum):
+        if not self.state_tracker:
+            return False
+        current = self.state_tracker.timeouts.get(key)
+        if current is None or current < minimum:
+            self.state_tracker.timeouts[key] = minimum
+            self.logger.info("STATE TIMEOUT %s extended to %ss", key, minimum)
+            try:
+                self.state_tracker._write_state()
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _reset_login_available_timer(self):
+        if self.state_tracker:
+            self.state_tracker.reset_state_timer("login_available")
+
+    @staticmethod
+    def _close_driver(driver):
+        if driver is None:
+            return
+        try:
+            driver.close()
+        except Exception:
+            pass
+
+    def _init_driver_with_fallbacks(self, driver_cls, driver_kwargs, fallback_drop_sets):
+        kwargs = dict(driver_kwargs)
+        last_error = None
+        for drop_keys in [()] + list(fallback_drop_sets):
+            for key in drop_keys:
+                kwargs.pop(key, None)
+            try:
+                return driver_cls(**kwargs)
+            except TypeError as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        return driver_cls(**kwargs)
+
+    def _output_has_login_prompt(self, output):
+        if not output:
+            return False
+        lower = output.lower()
+        if EULA_BANNER_RE.search(lower):
+            return True
+        if LIMITED_MODE_RE.search(lower):
+            return True
+        if "login:" not in lower:
+            return False
+        for line in lower.splitlines():
+            if "login:" in line and "last login:" not in line:
+                return True
+        return False
+
+    def _recover_config_mode(self):
+        self.logger.debug("session interrupted; attempting relogin and config-mode restore")
+        if not self._relogin(timeout=60):
+            return False
+        op = self._enter_config_mode()
+        return op is not None
+
+    def _send_config_cmd(self, cmd, timeout=60):
+        for _ in range(2):
+            op = self._send_cmd_wait(cmd, timeout=timeout)
+            if op is None:
+                if not self._recover_config_mode():
+                    return None
+                continue
+            if self._output_has_login_prompt(op) or self._prompt_is_sim(op):
+                if not self._recover_config_mode():
+                    return None
+                continue
+            return op
+        return None
+
+    def _login_reached_prompt(self, output):
+        if not output:
+            return False
+        if self._output_has_login_prompt(output):
+            return False
+        if re.search(r"login incorrect|authentication failed", output, re.IGNORECASE):
+            return False
+        return (
+            self._prompt_is_oper(output)
+            or self._prompt_is_config(output)
+            or self._prompt_is_sim(output)
+        )
+
+    def _password_change_required(self, output):
+        if not output:
+            return False
+        return PASSWORD_BANNER_RE.search(output) is not None
+
+    def _handle_password_change_banner(self):
+        if self.password_changed:
+            return True
+        self.logger.warning("password change banner detected; updating password")
+        self._reset_login_available_timer()
+        self._extend_state_timeout("bootstrap_done", DEFAULT_PASSWORD_BOOTSTRAP_TIMEOUT)
+        op = self._enter_config_mode()
+        if op is None:
+            self.logger.warning("unable to enter config mode for password change")
+            return False
+        if self.new_password == self.password:
+            self.logger.warning("new password matches current; skipping password change")
+            return False
+        self._send_cmd_wait(
+            f"system aaa authentication users user diag config password {self.new_password}",
+            timeout=60,
+        )
+        if self._state_timed_out():
+            return False
+        self._reset_login_available_timer()
+        self.password = self.new_password
+        self.password_changed = True
+        if not self._exit_to_oper(timeout=10, max_exits=4):
+            self.logger.warning("unable to exit config mode after password change")
+        # Some releases do not reliably present a clean login prompt
+        # immediately after password update. Keep the current session when
+        # possible, and only force a re-login if we cannot confirm a prompt.
+        post_change_output = self._wait_for_prompt(timeout=15, send_newline=True)
+        if not self._login_reached_prompt(post_change_output):
+            if not self._relogin(password=self.password, timeout=60):
+                self.logger.warning("login failed after password change")
+                return False
+        self._wait_for_non_sim_prompt(timeout=30)
+        return True
+
     def wait_for_bootstrap_done(self):
         while True:
             if self._state_timed_out():
                 return False
             op = self._send_cmd_wait("show bootstrap-status", timeout=60)
+            if self._password_change_required(op):
+                if not self._handle_password_change_banner():
+                    return False
+                continue
             if self._bootstrap_done_in_output(op):
                 self._mark_bootstrap_done()
                 return True
@@ -405,16 +593,28 @@ class SAOS_vm(vrnetlab.VM):
     def _wait_for_password_prompt(self, timeout=30):
         end = time.time() + timeout
         while time.time() < end:
-            idx, match, _ = self.tn.expect([b"Password:"], timeout=min(5, end - time.time()))
+            idx, match, _ = self.tn.expect(
+                [b"Password:", b"login:"], timeout=min(5, end - time.time())
+            )
             if match and idx == 0:
                 return True
+            if match and idx == 1:
+                # EULA/login loops may re-prompt for username before password.
+                user = getattr(self, "username", "diag")
+                try:
+                    self.tn.write(f"{user}\r".encode())
+                except Exception:
+                    return False
+                continue
             try:
                 self.tn.write(b"\r")
             except Exception:
                 pass
         return False
 
-    def _relogin(self, password="ciena123", timeout=60):
+    def _relogin(self, password=None, timeout=60):
+        if password is None:
+            password = self.password
         if not self._wait_for_login_prompt(timeout=timeout):
             try:
                 self.tn.write(b"exit\r")
@@ -434,8 +634,11 @@ class SAOS_vm(vrnetlab.VM):
             self.tn.write(f"{password}\r".encode())
         except Exception:
             return False
+        output = self._wait_for_prompt(timeout=60, send_newline=True)
+        if not self._login_reached_prompt(output):
+            return False
         self.logger.debug("login complete")
-        return self._wait_for_prompt(timeout=60, send_newline=True) is not None
+        return True
 
     def _enter_config_mode(self):
         timeout_s = DEFAULT_TIMEOUTS["config_ready"]
@@ -447,6 +650,10 @@ class SAOS_vm(vrnetlab.VM):
                 return None
             op = self._send_cmd_wait("config", timeout=30, settle_s=2)
             if op is None:
+                if not self._relogin(timeout=30):
+                    return None
+                continue
+            if self._output_has_login_prompt(op):
                 if not self._relogin(timeout=30):
                     return None
                 continue
@@ -469,94 +676,125 @@ class SAOS_vm(vrnetlab.VM):
 
     def apply_base_config(self):
         """Apply base config for hostname and management passthrough (if enabled)."""
-        new_password = False
         ipv4 = None
         subnet = None
         if self.mgmt_passthrough and not self.mgmt_dhcp:
             ipv4, subnet = self.mgmt_address_ipv4.split("/")
 
-        self.logger.info("applying base configuration")
-        self._wait_for_prompt(timeout=60, send_newline=True)
-        op = self._enter_config_mode()
-        if self._state_timed_out():
-            return False
-        if op is None:
-            self.logger.debug("config not ready, attempting re-login")
-            if not self._relogin():
-                self.logger.warning("unable to login for base config")
-                return False
-            op = self._enter_config_mode()
-            if self._state_timed_out():
-                return False
-        if op is None:
-            self.logger.warning("unable to enter config mode")
-            return False
-        # newer load has the string "password" in the output
-        if op and "password" in op:
-            new_password = True
-
-        # newer load requires password change
-        if new_password:
-            self._send_cmd_wait(
-                "system aaa authentication users user diag config password ciena1234",
-                timeout=60,
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            self.logger.info(
+                "applying base configuration (attempt %s/%s)", attempt, attempts
             )
-            if self._state_timed_out():
-                return False
-            if not self._relogin(password="ciena1234"):
-                self.logger.warning("login failed after password change")
-                return False
+            self._wait_for_prompt(timeout=60, send_newline=True)
             op = self._enter_config_mode()
             if self._state_timed_out():
                 return False
             if op is None:
-                self.logger.warning("unable to enter config mode after password change")
-                return False
-            # change password back to default password
-            self._send_cmd_wait(
-                "system aaa authentication users user diag config password ciena123",
-                timeout=60,
+                self.logger.debug("config not ready, attempting re-login")
+                if not self._relogin():
+                    self.logger.warning("unable to login for base config")
+                    if attempt >= attempts:
+                        return False
+                    continue
+                op = self._enter_config_mode()
+                if self._state_timed_out():
+                    return False
+            if op is None:
+                self.logger.warning("unable to enter config mode")
+                if attempt >= attempts:
+                    return False
+                continue
+
+            if op and (not self.password_changed) and self._password_change_required(op):
+                if not self._handle_password_change_banner():
+                    return False
+                if attempt >= attempts:
+                    return False
+                continue
+
+            if self.state_tracker:
+                self.state_tracker.set_state("config_ready")
+
+            base_ok = True
+            hostname_out = self._send_config_cmd(
+                f"system config hostname {self.hostname}", timeout=60
             )
+            if hostname_out is None or self._output_has_cli_error(hostname_out):
+                base_ok = False
             if self._state_timed_out():
                 return False
+            if ipv4 and subnet:
+                dhcp_out = self._send_config_cmd(
+                    "dhcp-client client mgmtbr0 admin-enable false", timeout=60
+                )
+                if dhcp_out is None or self._output_has_cli_error(dhcp_out):
+                    base_ok = False
+                if self._state_timed_out():
+                    return False
+                addr_out = self._send_config_cmd(
+                    f"oc-if:interfaces interface mgmtbr0 ipv4 addresses address {ipv4} "
+                    f"config ip {ipv4} prefix-length {subnet}",
+                    timeout=60,
+                )
+                if addr_out is None or self._output_has_cli_error(addr_out):
+                    base_ok = False
+                if self._state_timed_out():
+                    return False
+                route_out = self._send_config_cmd(
+                    f"rib vrf default ipv4 0.0.0.0/0 next-hop {re.sub(r'\d+$', '1', ipv4)}",
+                    timeout=60,
+                )
+                if route_out is None or self._output_has_cli_error(route_out):
+                    base_ok = False
+                if self._state_timed_out():
+                    return False
+            if not self._exit_to_oper(timeout=30, max_exits=12):
+                base_ok = False
+            if base_ok and ipv4 and subnet:
+                if not self._verify_mgmt_base_config(
+                    ipv4=ipv4,
+                    gateway=re.sub(r"\d+$", "1", ipv4),
+                ):
+                    base_ok = False
+            if base_ok:
+                if self.state_tracker:
+                    self.state_tracker.set_state("config_base_applied")
+                return True
 
-        if self.state_tracker:
-            self.state_tracker.set_state("config_ready")
+            self.logger.warning(
+                "base configuration attempt %s/%s did not complete", attempt, attempts
+            )
+            if attempt < attempts:
+                self._relogin(timeout=30)
+                continue
+            return False
+        return False
 
-        base_ok = True
-        if self._send_cmd_wait(f"system config hostname {self.hostname}", timeout=60) is None:
-            base_ok = False
-        if self._state_timed_out():
+    def _verify_mgmt_base_config(self, ipv4, gateway):
+        iface_out = self._send_cmd_wait("show ip interfaces interface mgmtbr0", timeout=60)
+        if iface_out is None or self._output_has_cli_error(iface_out):
+            self.logger.warning("mgmt base verification failed: interface output unavailable")
             return False
-        if ipv4 and subnet:
-            if self._send_cmd_wait(
-                "dhcp-client client mgmtbr0 admin-enable false", timeout=60
-            ) is None:
-                base_ok = False
-            if self._state_timed_out():
-                return False
-            if self._send_cmd_wait(
-                f"oc-if:interfaces interface mgmtbr0 ipv4 addresses address {ipv4} "
-                f"config ip {ipv4} prefix-length {subnet}",
-                timeout=60,
-            ) is None:
-                base_ok = False
-            if self._state_timed_out():
-                return False
-            if self._send_cmd_wait(
-                f"rib vrf default ipv4 0.0.0.0/0 next-hop {re.sub(r'\d+$', '1', ipv4)}",
-                timeout=60,
-            ) is None:
-                base_ok = False
-            if self._state_timed_out():
-                return False
-        if not self._exit_to_oper(timeout=30, max_exits=8):
-            base_ok = False
-        if not base_ok:
-            self.logger.warning("base configuration did not complete")
+        route_out = self._send_cmd_wait("show ip route", timeout=60)
+        if route_out is None or self._output_has_cli_error(route_out):
+            self.logger.warning("mgmt base verification failed: route output unavailable")
             return False
-        if self.state_tracker:
-            self.state_tracker.set_state("config_base_applied")
+        if ipv4 not in iface_out:
+            self.logger.warning(
+                "mgmt base verification failed: expected mgmt IP %s not present", ipv4
+            )
+            return False
+        if (
+            "0.0.0.0/0" not in route_out
+            or gateway not in route_out
+            or "mgmtbr0" not in route_out
+        ):
+            self.logger.warning(
+                "mgmt base verification failed: expected default route via %s missing",
+                gateway,
+            )
+            return False
         return True
 
     def startup_config(self):
@@ -633,6 +871,17 @@ class SAOS_vm(vrnetlab.VM):
         prompt = self._last_prompt(output)
         return bool(prompt and prompt.startswith("BASE-dnx-SIM"))
 
+    def _output_has_cli_error(self, output):
+        if not output:
+            return True
+        lower = output.lower()
+        return (
+            "shell parser failure" in lower
+            or "no matching entry found" in lower
+            or "% error" in lower
+            or "config mode error" in lower
+        )
+
     def _wait_for_non_sim_prompt(self, timeout=120):
         end = time.time() + timeout
         last_prompt = None
@@ -655,6 +904,13 @@ class SAOS_vm(vrnetlab.VM):
             op = self._send_cmd_wait("exit", timeout=timeout, settle_s=2)
             if self._state_timed_out():
                 return False
+            if op and self._output_has_login_prompt(op):
+                if not self._relogin(timeout=30):
+                    return False
+                op = self._wait_for_prompt(timeout=10, send_newline=True)
+                if op and self._prompt_is_oper(op):
+                    return True
+                continue
             if op and self._prompt_is_oper(op):
                 return True
         op = self._wait_for_prompt(timeout=timeout, send_newline=True)
@@ -664,32 +920,64 @@ class SAOS_vm(vrnetlab.VM):
 
     def _send_cmd_wait(self, cmd, timeout=30, settle_s=0):
         self.logger.debug("writing to serial console: '%s'", cmd)
+        pre_output = b""
         try:
-            self.tn.read_very_eager()
+            pre_output = self.tn.read_very_eager() or b""
         except Exception:
             pass
         self.tn.write(f"{cmd}\r".encode())
-        if settle_s > 0:
-            output = self._wait_for_prompt_settled(timeout=timeout, settle_s=settle_s)
-        else:
-            output = self._wait_for_prompt(timeout=timeout, send_newline=False)
+        end = time.time() + timeout
+        buffer = b""
+        matched_prompt = False
+        patterns = PROMPT_PATTERNS + PAGER_PATTERNS
+        while time.time() < end:
+            remaining = max(1, int(end - time.time()))
+            idx, match, data = self.tn.expect(patterns, timeout=min(5, remaining))
+            if data:
+                buffer += data
+            if not match:
+                continue
+            if idx >= len(PROMPT_PATTERNS):
+                # Consume paged output so long "show" commands include full text.
+                try:
+                    self.tn.write(b" ")
+                except Exception:
+                    pass
+                continue
+            matched_prompt = True
+            if settle_s > 0:
+                settle_end = min(end, time.time() + settle_s)
+                while time.time() < settle_end:
+                    wait = max(0.1, min(0.5, settle_end - time.time()))
+                    idx2, match2, data2 = self.tn.expect(patterns, timeout=wait)
+                    if data2:
+                        buffer += data2
+                        settle_end = min(end, time.time() + settle_s)
+                    if not match2:
+                        continue
+                    if idx2 >= len(PROMPT_PATTERNS):
+                        try:
+                            self.tn.write(b" ")
+                        except Exception:
+                            pass
+                        settle_end = min(end, time.time() + settle_s)
+                    else:
+                        settle_end = min(end, time.time() + settle_s)
+            break
+        output = buffer.decode(errors="ignore") if matched_prompt else None
         if output is None:
             output = self._wait_for_prompt(timeout=10, send_newline=True)
+        if pre_output:
+            prefix = pre_output.decode(errors="ignore")
+            output = f"{prefix}{output or ''}"
         return output
 
 
 class SAOS(vrnetlab.VR):
     def __init__(self, hostname, username, password, conn_mode):
         super().__init__(username, password)
-        self.health_mode = os.environ.get("SAOS_HEALTH_MODE", "strict").lower()
-        if self.health_mode not in ("strict", "progressive"):
-            self.logger.warning(
-                "Invalid SAOS_HEALTH_MODE=%s, defaulting to strict",
-                self.health_mode,
-            )
-            self.health_mode = "strict"
 
-        self.state_timeouts = {
+        state_timeouts = {
             "login_available": self._read_timeout_env(
                 "SAOS_STATE_TIMEOUT_LOGIN_S", DEFAULT_TIMEOUTS["login_available"]
             ),
@@ -717,19 +1005,18 @@ class SAOS(vrnetlab.VR):
         self.state_tracker = SAOSStateTracker(
             self.logger,
             state_order=STATE_ORDER,
-            timeouts=self.state_timeouts,
+            timeouts=state_timeouts,
             state_file="/state.json",
-            meta={"health_mode": self.health_mode},
         )
         self.ssh_successes = 0
-        self.last_probe = 0.0
+        self.ssh_probe_failures = 0
+        self.next_ssh_probe_at = 0.0
         self.probe_interval = self._read_timeout_env(
             "SAOS_STATE_PROBE_INTERVAL_S", DEFAULT_PROBE_INTERVAL_S
         )
         self.passthrough_ssh_grace_s = self._read_timeout_env(
             "SAOS_PASSTHROUGH_SSH_GRACE_S", DEFAULT_PASSTHROUGH_SSH_GRACE_S
         )
-        self.passthrough_ready_since = None
         self.startup_partial_config_path = os.environ.get("SAOS_STARTUP_CONFIG_PATH")
         self.startup_partial_retry_s = self._read_timeout_env(
             "SAOS_STARTUP_PARTIAL_RETRY_S", DEFAULT_STARTUP_PARTIAL_RETRY_S
@@ -740,8 +1027,29 @@ class SAOS(vrnetlab.VR):
         self.startup_partial_config = None
         self.startup_partial_config_kind = None
         self.startup_partial_error = None
+        self.startup_partial_external_required = False
+        self.startup_partial_external_target = None
+        self.startup_partial_external_reason = None
+        self.ssh_probe_blind_spot_marked = False
+        self.startup_partial_passthrough_timeout_s = self._read_timeout_env(
+            "SAOS_STATE_TIMEOUT_STARTUP_PARTIAL_PASSTHROUGH_S", 600
+        )
 
         self.vms = [SAOS_vm(hostname, username, password, conn_mode, self.state_tracker)]
+        if self.vms[0].mgmt_passthrough:
+            timeout_s = self.state_tracker.timeouts.get("startup_partial_applied", 0)
+            if timeout_s < self.startup_partial_passthrough_timeout_s:
+                self.state_tracker.timeouts["startup_partial_applied"] = (
+                    self.startup_partial_passthrough_timeout_s
+                )
+                self.logger.info(
+                    "STATE TIMEOUT startup_partial_applied set to %ss for passthrough mode",
+                    self.startup_partial_passthrough_timeout_s,
+                )
+                try:
+                    self.state_tracker._write_state()
+                except Exception:
+                    pass
 
         try:
             soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -765,6 +1073,30 @@ class SAOS(vrnetlab.VR):
             self.logger.warning("Invalid %s=%s, using default %s", name, value, default)
             return default
 
+    @staticmethod
+    def _close_driver(driver):
+        if driver is None:
+            return
+        try:
+            driver.close()
+        except Exception:
+            pass
+
+    def _init_driver_with_fallbacks(self, driver_cls, driver_kwargs, fallback_drop_sets):
+        kwargs = dict(driver_kwargs)
+        last_error = None
+        for drop_keys in [()] + list(fallback_drop_sets):
+            for key in drop_keys:
+                kwargs.pop(key, None)
+            try:
+                return driver_cls(**kwargs)
+            except TypeError as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        return driver_cls(**kwargs)
+
     def _probe_port(self, host, port, timeout=1):
         try:
             sock = socket.create_connection((host, port), timeout=timeout)
@@ -776,6 +1108,17 @@ class SAOS(vrnetlab.VR):
     def _resolve_mgmt_ip(self):
         if not self.vms[0].mgmt_passthrough:
             return "127.0.0.1"
+        ip_cidr = self.vms[0].mgmt_address_ipv4
+        if not ip_cidr or ip_cidr == "dhcp":
+            try:
+                ip_cidr, _ = self.vms[0].get_mgmt_address()
+            except Exception:
+                return None
+        if not ip_cidr or ip_cidr == "dhcp":
+            return None
+        return ip_cidr.split("/")[0]
+
+    def _local_mgmt_ip(self):
         ip_cidr = self.vms[0].mgmt_address_ipv4
         if not ip_cidr or ip_cidr == "dhcp":
             try:
@@ -876,11 +1219,58 @@ class SAOS(vrnetlab.VR):
             or "% error" in lower
         )
 
-    def _apply_startup_partial_config_cli(self, config):
-        target_ip = self._resolve_mgmt_ip()
-        if not target_ip:
-            return False
+    def _startup_apply_blind_spot(self, target_ip):
+        return (
+            self.vms[0].mgmt_passthrough
+            and target_ip
+            and target_ip == self._local_mgmt_ip()
+        )
+
+    def _update_state_meta(self, **kwargs):
+        if not self.state_tracker:
+            return
+        self.state_tracker.meta.update(kwargs)
+        try:
+            self.state_tracker._write_state()
+        except Exception:
+            pass
+
+    def _mark_startup_partial_external_required(self, target_ip):
+        reason = (
+            "startup partial apply requires external controller: "
+            f"in-container access to {target_ip} is not possible in mgmt passthrough mode; "
+            "apply config externally via SSH/NETCONF to the VM IP"
+        )
+        if self.startup_partial_external_required:
+            return
+        self.startup_partial_external_required = True
+        self.startup_partial_external_target = target_ip
+        self.startup_partial_external_reason = reason
+        self.logger.warning(reason)
+        self._update_state_meta(
+            startup_partial_external_required=True,
+            startup_partial_external_target=target_ip,
+            startup_partial_external_reason=reason,
+        )
+
+    def _mark_ssh_probe_blind_spot(self, target_ip):
+        if self.ssh_probe_blind_spot_marked:
+            return
+        self.ssh_probe_blind_spot_marked = True
+        reason = (
+            "in-container SSH probe blind-spot in mgmt passthrough mode: "
+            f"target {target_ip} resolves as local in the container namespace; "
+            "validate reachability from host-side probes"
+        )
+        self._update_state_meta(
+            ssh_probe_blind_spot=True,
+            ssh_probe_blind_spot_target=target_ip,
+            ssh_probe_blind_spot_reason=reason,
+        )
+
+    def _apply_startup_partial_config_cli(self, target_ip, config):
         if not self._probe_port(target_ip, 22):
+            self.logger.debug("CLI startup apply waiting for SSH on %s:22", target_ip)
             return False
         try:
             from scrapli.driver.generic import GenericDriver
@@ -902,18 +1292,14 @@ class SAOS(vrnetlab.VR):
                 "timeout_ops": 60,
                 "comms_prompt_pattern": self._cli_prompt_pattern(),
             }
-            try:
-                driver = GenericDriver(**driver_kwargs)
-            except TypeError:
-                driver_kwargs.pop("transport", None)
-                driver_kwargs.pop("comms_prompt_pattern", None)
-                try:
-                    driver = GenericDriver(**driver_kwargs)
-                except TypeError:
-                    driver_kwargs.pop("timeout_socket", None)
-                    driver_kwargs.pop("timeout_transport", None)
-                    driver_kwargs.pop("timeout_ops", None)
-                    driver = GenericDriver(**driver_kwargs)
+            driver = self._init_driver_with_fallbacks(
+                GenericDriver,
+                driver_kwargs,
+                [
+                    ("transport", "comms_prompt_pattern"),
+                    ("timeout_socket", "timeout_transport", "timeout_ops"),
+                ],
+            )
             driver.open()
             response = driver.send_command("config", timeout_ops=60)
             if self._cli_output_failed(response.result):
@@ -930,12 +1316,11 @@ class SAOS(vrnetlab.VR):
                     return False
             for _ in range(3):
                 driver.send_command("exit", timeout_ops=30)
+        except Exception as exc:
+            self.logger.warning("CLI apply raised %s", exc)
+            return False
         finally:
-            if driver is not None:
-                try:
-                    driver.close()
-                except Exception:
-                    pass
+            self._close_driver(driver)
         self.logger.info("Startup partial config applied via CLI")
         return True
 
@@ -952,15 +1337,23 @@ class SAOS(vrnetlab.VR):
         if now - self.startup_partial_last_attempt < self.startup_partial_retry_s:
             return False
         self.startup_partial_last_attempt = now
+        target_ip = self._resolve_mgmt_ip()
+        if not target_ip:
+            self.logger.debug("startup partial apply waiting for management IP")
+            return False
+        if self._startup_apply_blind_spot(target_ip):
+            self._mark_startup_partial_external_required(target_ip)
+            # In passthrough mode this container cannot reach the VM IP directly.
+            # Mark this stage complete so external orchestrators can apply config.
+            self.startup_partial_applied = True
+            return True
         if self.startup_partial_config_kind == "cli":
-            if self._apply_startup_partial_config_cli(config):
+            if self._apply_startup_partial_config_cli(target_ip, config):
                 self.startup_partial_applied = True
                 return True
             return False
-        target_ip = self._resolve_mgmt_ip()
-        if not target_ip:
-            return False
         if not self._probe_port(target_ip, 830):
+            self.logger.debug("NETCONF startup apply waiting for NETCONF on %s:830", target_ip)
             return False
         netconf_import_error = None
         try:
@@ -996,18 +1389,14 @@ class SAOS(vrnetlab.VR):
                 "timeout_ops": 60,
                 "preferred_netconf_version": "1.0",
             }
-            try:
-                driver = NetconfDriver(**driver_kwargs)
-            except TypeError:
-                driver_kwargs.pop("transport", None)
-                driver_kwargs.pop("preferred_netconf_version", None)
-                try:
-                    driver = NetconfDriver(**driver_kwargs)
-                except TypeError:
-                    driver_kwargs.pop("timeout_socket", None)
-                    driver_kwargs.pop("timeout_transport", None)
-                    driver_kwargs.pop("timeout_ops", None)
-                    driver = NetconfDriver(**driver_kwargs)
+            driver = self._init_driver_with_fallbacks(
+                NetconfDriver,
+                driver_kwargs,
+                [
+                    ("transport", "preferred_netconf_version"),
+                    ("timeout_socket", "timeout_transport", "timeout_ops"),
+                ],
+            )
             driver.open()
             response = driver.edit_config(
                 config=self._prepare_netconf_config(config),
@@ -1021,35 +1410,47 @@ class SAOS(vrnetlab.VR):
             self.logger.warning("NETCONF apply failed: %s", exc)
             return False
         finally:
-            if driver is not None:
-                try:
-                    driver.close()
-                except Exception:
-                    pass
+            self._close_driver(driver)
         self.logger.info("Startup partial config applied via NETCONF")
         self.startup_partial_applied = True
         return True
 
     def _check_ssh_ready(self):
-        if self.vms[0].mgmt_passthrough:
-            if self.passthrough_ready_since is None:
-                self.passthrough_ready_since = time.monotonic()
-            elif time.monotonic() - self.passthrough_ready_since >= self.passthrough_ssh_grace_s:
-                self.ssh_successes = 2
-                self.state_tracker.set_state("ssh_ready")
-            return
         now = time.monotonic()
-        if now - self.last_probe < self.probe_interval:
+        if now < self.next_ssh_probe_at:
             return
-        self.last_probe = now
         target_ip = self._resolve_mgmt_ip()
         if not target_ip:
+            backoff_s = (
+                self.passthrough_ssh_grace_s
+                if self.vms[0].mgmt_passthrough
+                else self.probe_interval
+            )
+            self.next_ssh_probe_at = now + backoff_s
             return
+        blind_spot = (
+            self.vms[0].mgmt_passthrough and target_ip == self._local_mgmt_ip()
+        )
         ssh_ok = self._probe_port(target_ip, 22)
         if ssh_ok:
             self.ssh_successes += 1
+            self.ssh_probe_failures = 0
+            self.next_ssh_probe_at = now + self.probe_interval
         else:
             self.ssh_successes = 0
+            self.ssh_probe_failures += 1
+            backoff_s = (
+                self.passthrough_ssh_grace_s
+                if self.vms[0].mgmt_passthrough
+                else self.probe_interval
+            )
+            self.next_ssh_probe_at = now + backoff_s
+            if blind_spot and self.ssh_probe_failures == 1:
+                self.logger.warning(
+                    "ssh probe blind-spot in passthrough mode for %s; host-side reachability should be validated externally",
+                    target_ip,
+                )
+                self._mark_ssh_probe_blind_spot(target_ip)
         if self.ssh_successes >= 2:
             self.state_tracker.set_state("ssh_ready")
 
@@ -1062,12 +1463,6 @@ class SAOS(vrnetlab.VR):
         current = self.state_tracker.current
         if not current:
             self.update_health(1, "starting")
-            return
-        if self.health_mode == "progressive":
-            if current == "healthy":
-                self.update_health(0, "healthy")
-            else:
-                self.update_health(0, f"healthy:{current}")
             return
         if current == "healthy":
             self.update_health(0, "healthy")
@@ -1088,7 +1483,15 @@ class SAOS(vrnetlab.VR):
             self.state_tracker.check_timeout()
 
             if self.state_tracker.current == "config_base_applied":
-                self._check_ssh_ready()
+                target_ip = self._resolve_mgmt_ip()
+                # In mgmt passthrough, in-container probing can be blind for the VM IP.
+                # Skip internal ssh gating and transition via external-required startup apply.
+                if self._startup_apply_blind_spot(target_ip):
+                    self._mark_ssh_probe_blind_spot(target_ip)
+                    if self._apply_startup_partial_config():
+                        self.state_tracker.set_state("startup_partial_applied")
+                else:
+                    self._check_ssh_ready()
             if self.state_tracker.current == "ssh_ready":
                 if self._apply_startup_partial_config():
                     self.state_tracker.set_state("startup_partial_applied")

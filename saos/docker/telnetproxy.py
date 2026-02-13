@@ -43,7 +43,7 @@ class RemoteSession:
                 log.info(f"Connecting to remote {self.remote_server}:{self.remote_port}")
                 self.reader, self.writer = await asyncio.wait_for(
                     telnetlib3.open_connection(
-                        host=self.remote_server,
+                        host=self.remote_server, 
                         port=self.remote_port
                     ),
                     timeout=10
@@ -73,7 +73,7 @@ class RemoteSession:
         # Start the flush queue task once
         if not self.flush_task or self.flush_task.done():
             self.flush_task = create_task(self.flush_queue_loop())
-
+        
         while not self.closing:
             if not self.reader or not self.writer:
                 if not await self.connect():
@@ -140,7 +140,12 @@ class RemoteSession:
         if not self.writer:
             return
         try:
-            self.writer.write(self.IAC + self.NOP)
+            if hasattr(self.writer, "iac"):
+                self.writer.iac(self.NOP)
+            elif hasattr(self.writer, "send_iac"):
+                self.writer.send_iac(self.IAC + self.NOP)
+            else:
+                self.writer.write("\r")
             await asyncio.wait_for(self.writer.drain(), timeout=10)
             log.debug("Sent remote heartbeat (IAC NOP)")
         except Exception as e:
@@ -165,7 +170,7 @@ class RemoteSession:
                 data = await asyncio.wait_for(self.queue.get(), timeout=1)
             except asyncio.TimeoutError:
                 continue
-
+            
             if not data:
                 continue
 
@@ -203,7 +208,7 @@ class RemoteSession:
         if not self.closing:
             self.closing = True
         self.close_event.set()
-
+        
         # Cancel flush task
         if self.flush_task and not self.flush_task.done():
             self.flush_task.cancel()
@@ -211,17 +216,17 @@ class RemoteSession:
                 await self.flush_task
             except asyncio.CancelledError:
                 pass
-
+        
         # Close connection
         await self.cleanup_connection()
-
+        
         # Clear queue
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-
+        
         log.info("Remote session closed")
 
 
@@ -248,13 +253,13 @@ class TelnetManager:
         """Unregister a client connection."""
         peer = writer.get_extra_info('peername')
         writer_id = id(writer)
-
+        
         try:
             if not writer.is_closing():
                 writer.close()
         except Exception as e:
             log.debug(f"Error closing writer: {e}")
-
+        
         self.clients.pop(writer_id, None)
         log.info(f"Client disconnected: {peer}. Remaining: {len(self.clients)}")
 
@@ -262,16 +267,16 @@ class TelnetManager:
         """Send data to all connected clients."""
         if not data or not self.clients:
             return
-
+        
         # Work with a snapshot to avoid dict mutation issues
         clients_snapshot = list(self.clients.items())
-
+        
         for writer_id, writer in clients_snapshot:
             try:
                 if writer.is_closing():
                     self.clients.pop(writer_id, None)
                     continue
-
+                    
                 writer.write(data)
                 await asyncio.wait_for(writer.drain(), timeout=2)
             except Exception as e:
@@ -308,7 +313,12 @@ class TelnetManager:
                     await asyncio.sleep(self.heartbeat)
                     if writer.is_closing():
                         break
-                    writer.write(self.IAC + self.NOP)
+                    if hasattr(writer, "iac"):
+                        writer.iac(self.NOP)
+                    elif hasattr(writer, "send_iac"):
+                        writer.send_iac(self.IAC + self.NOP)
+                    else:
+                        writer.write("\r")
                     await asyncio.wait_for(writer.drain(), timeout=5)
                     log.debug(f"Sent keepalive to client {peer}")
             except asyncio.CancelledError:
@@ -331,7 +341,7 @@ class TelnetManager:
 
 class ConnectionMuxer:
     """Main multiplexer coordinating remote and client connections."""
-
+    
     def __init__(self, listen_ip, listen_port, remote_server, remote_port, heartbeat=30, client_timeout=86400):
         self.listen_ip = listen_ip
         self.listen_port = listen_port
@@ -347,7 +357,7 @@ class ConnectionMuxer:
         self.read_task = create_task(
             self.remote.read_loop(self.clients.broadcast)
         )
-
+        
         # Start telnet server for clients
         self.server = await telnetlib3.create_server(
             host=self.listen_ip,
@@ -355,7 +365,7 @@ class ConnectionMuxer:
             shell=self.clients.client_handler
         )
         log.info(f"Telnet proxy listening on {self.listen_ip}:{self.listen_port}")
-
+        
         try:
             await self.server.wait_closed()
         except asyncio.CancelledError:
@@ -364,7 +374,7 @@ class ConnectionMuxer:
     async def stop(self):
         """Stop the multiplexer and clean up resources."""
         log.info("Stopping multiplexer...")
-
+        
         # Cancel read task
         if self.read_task and not self.read_task.done():
             self.read_task.cancel()
@@ -372,19 +382,19 @@ class ConnectionMuxer:
                 await self.read_task
             except asyncio.CancelledError:
                 pass
-
+        
         # Close remote session
         await self.remote.close()
-
+        
         # Close server
         if self.server:
             self.server.close()
             await self.server.wait_closed()
-
+        
         # Disconnect all clients
         for writer_id, writer in list(self.clients.clients.items()):
             self.clients.unregister(writer)
-
+        
         log.info("Multiplexer stopped")
 
 
@@ -395,15 +405,15 @@ async def main():
         level=logging.INFO,
         format=LOG_FORMAT
     )
-
+    
     parser = argparse.ArgumentParser(description="Telnet Proxy Multiplexer")
-    parser.add_argument("--remote-server", default="127.0.0.1",
+    parser.add_argument("--remote-server", default="127.0.0.1", 
                        help="Remote server IP or hostname")
-    parser.add_argument("--remote-port", type=int, default=5100,
+    parser.add_argument("--remote-port", type=int, default=5100, 
                        help="Remote server port")
-    parser.add_argument("--listen-ip", default="0.0.0.0",
+    parser.add_argument("--listen-ip", default="0.0.0.0", 
                        help="IP address to listen on")
-    parser.add_argument("--listen-port", type=int, default=5000,
+    parser.add_argument("--listen-port", type=int, default=5000, 
                        help="Port to listen on")
     parser.add_argument("--heartbeat", type=int, default=30,
                        help="Heartbeat interval in seconds (default: 30)")
@@ -422,11 +432,11 @@ async def main():
 
     # Set up signal handlers for graceful shutdown
     shutdown_event = asyncio.Event()
-
+    
     def signal_handler():
         log.info("Shutdown signal received")
         shutdown_event.set()
-
+    
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
@@ -434,13 +444,13 @@ async def main():
     try:
         # Start multiplexer
         start_task = create_task(multiplexer.start())
-
+        
         # Wait for shutdown signal
         await shutdown_event.wait()
-
+        
         log.info("Shutting down...")
         await multiplexer.stop()
-
+        
         # Cancel start task if still running
         if not start_task.done():
             start_task.cancel()
@@ -448,7 +458,7 @@ async def main():
                 await start_task
             except asyncio.CancelledError:
                 pass
-
+                
     except Exception as e:
         log.error(f"Multiplexer failure: {e}")
         await multiplexer.stop()

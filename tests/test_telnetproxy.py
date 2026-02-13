@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from unittest.mock import Mock, patch
-from telnetproxy import (
+from saos.docker.telnetproxy import (
     RemoteSession,
     TelnetManager,
     ConnectionMuxer
@@ -66,13 +66,13 @@ def log_test_start_end(request):
 @pytest.fixture
 def mock_telnetlib3():
     """Mock telnetlib3 module."""
-    with patch("telnetproxy.telnetlib3") as mock:
+    with patch("saos.docker.telnetproxy.telnetlib3") as mock:
         yield mock
 
 @pytest.fixture
 def mock_socket():
     """Mock socket module."""
-    with patch("telnetproxy.socket") as mock:
+    with patch("saos.docker.telnetproxy.socket") as mock:
         yield mock
 
 
@@ -131,15 +131,12 @@ class TestRemoteSession:
         # Start connect task
         task = create_task_compat(session.connect())
         await asyncio.sleep(0.3)  # Let it attempt and fail
-        session.closing = True
+        await session.close()
         
         # Should return False when closing
         result = await task
         assert result is False
         
-        # Clean up
-        await session.close()
-
     @pytest.mark.asyncio
     async def test_write_data(self, mock_telnetlib3):
         """Test writing data to remote."""
@@ -206,7 +203,7 @@ class TestRemoteSession:
         # Run read loop briefly
         task = create_task_compat(session.read_loop(callback))
         await asyncio.sleep(0.1)
-        session.closing = True
+        await session.close()
         
         try:
             await asyncio.wait_for(task, timeout=1)
@@ -246,7 +243,7 @@ class TestRemoteSession:
         
         task = create_task_compat(session.read_loop(callback))
         await asyncio.sleep(0.5)  # Give time for multiple reads
-        session.closing = True
+        await session.close()
         
         try:
             await asyncio.wait_for(task, timeout=1)
@@ -625,7 +622,7 @@ class TestHeartbeat:
         
         task = create_task_compat(session.read_loop(callback))
         await asyncio.sleep(0.3)
-        session.closing = True
+        await session.close()
         
         try:
             await asyncio.wait_for(task, timeout=1)
@@ -749,7 +746,7 @@ class TestErrorScenarios:
         
         task = create_task_compat(session.read_loop(callback))
         await asyncio.sleep(0.2)
-        session.closing = True
+        await session.close()
         
         try:
             await asyncio.wait_for(task, timeout=1)
