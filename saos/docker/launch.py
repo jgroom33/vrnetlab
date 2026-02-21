@@ -56,6 +56,7 @@ PROMPT_TOKEN_RE = re.compile(r"[A-Za-z0-9_.@:()~/\-]+\??[>#]|[A-Za-z0-9_.@:()~/\
 STATE_ORDER = [
     "waiting_for_login",
     "login_available",
+    "password_revert",
     "bootstrap_done",
     "config_ready",
     "config_base_applied",
@@ -65,6 +66,7 @@ STATE_ORDER = [
 ]
 DEFAULT_TIMEOUTS = {
     "login_available": 300,
+    "password_revert": 300,
     "bootstrap_done": 300,
     "config_ready": 300,
     "config_base_applied": 900,
@@ -76,6 +78,10 @@ DEFAULT_PROBE_INTERVAL_S = 5
 DEFAULT_PASSTHROUGH_SSH_GRACE_S = 60
 DEFAULT_STARTUP_PARTIAL_RETRY_S = 15
 DEFAULT_NEW_PASSWORD = os.environ.get("SAOS_NEW_PASSWORD", "Ciena123!")
+DEFAULT_PASSWORD_CMD_TIMEOUT = int(os.environ.get("SAOS_PASSWORD_CMD_TIMEOUT_S", "180"))
+DEFAULT_PASSWORD_VERIFY_TIMEOUT = int(
+    os.environ.get("SAOS_PASSWORD_VERIFY_TIMEOUT_S", "45")
+)
 DEFAULT_PASSWORD_BOOTSTRAP_TIMEOUT = int(
     os.environ.get("SAOS_STATE_TIMEOUT_BOOTSTRAP_PASSWORD_S", "300")
 )
@@ -329,7 +335,10 @@ class SAOS_vm(vrnetlab.VM):
 
         self.hostname = hostname
         self.state_tracker = state_tracker
+        self.original_password = password
         self.new_password = DEFAULT_NEW_PASSWORD
+        self.password_cmd_timeout = DEFAULT_PASSWORD_CMD_TIMEOUT
+        self.password_verify_timeout = DEFAULT_PASSWORD_VERIFY_TIMEOUT
         self.password_changed = False
 
         self.uuid = str(uuid.uuid4())
@@ -389,6 +398,8 @@ class SAOS_vm(vrnetlab.VM):
                 if self._password_change_required(output):
                     if not self._handle_password_change_banner():
                         return
+                if self.state_tracker and self.state_tracker.current != "password_revert":
+                    self.state_tracker.set_state("password_revert")
                 self.logger.debug("login complete")
 
                 if not self.wait_for_bootstrap_done():
@@ -529,39 +540,133 @@ class SAOS_vm(vrnetlab.VM):
             return False
         return PASSWORD_BANNER_RE.search(output) is not None
 
+    def _set_diag_password(self, password, action, timeout=None):
+        cmd_timeout = timeout or self.password_cmd_timeout
+        output = self._send_cmd_wait(
+            f"system aaa authentication users user diag config password {password}",
+            timeout=cmd_timeout,
+        )
+        if output is None:
+            self.logger.warning(
+                "unable to %s password (no prompt after %ss)",
+                action,
+                cmd_timeout,
+            )
+            return False
+        if self._output_has_cli_error(output):
+            self.logger.warning("failed to %s password", action)
+            return False
+        return True
+
+    def _probe_working_password(self, candidates, timeout=None):
+        probe_timeout = timeout or self.password_verify_timeout
+        seen = set()
+        for idx, candidate in enumerate(candidates, 1):
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if self._relogin(password=candidate, timeout=probe_timeout):
+                self.logger.debug("password probe candidate %s accepted", idx)
+                return candidate
+            self.logger.debug("password probe candidate %s rejected", idx)
+        return None
+
+    def _apply_password_and_verify(self, target_password, previous_password, action):
+        cmd_ok = self._set_diag_password(target_password, action)
+        if not cmd_ok:
+            self.logger.warning(
+                "%s password command did not complete cleanly; probing active credentials",
+                action,
+            )
+        if self._state_timed_out():
+            return False
+        self._reset_login_available_timer()
+        if not self._exit_to_oper(timeout=15, max_exits=8):
+            self.logger.warning("unable to exit config mode after %s password command", action)
+        active_password = self._probe_working_password(
+            [target_password, previous_password],
+            timeout=self.password_verify_timeout,
+        )
+        if active_password is None:
+            self.logger.warning("unable to verify %s password outcome", action)
+            return False
+        self.password = active_password
+        self._reset_login_available_timer()
+        if active_password != target_password:
+            self.logger.warning("%s password did not activate target credential", action)
+            return False
+        return True
+
+    def _restore_original_password(self):
+        if self.password == self.original_password:
+            return True
+        self.logger.warning("restoring password to original value")
+        attempts = 2
+        prior_password = self.password
+        for attempt in range(1, attempts + 1):
+            op = self._enter_config_mode()
+            if op is None:
+                self.logger.warning("unable to enter config mode for password restore")
+                return False
+            if self._apply_password_and_verify(
+                self.original_password,
+                prior_password,
+                "restore",
+            ):
+                if not self._wait_for_non_sim_prompt(timeout=30):
+                    self.logger.warning("non-SIM prompt not observed after password restore")
+                if self.state_tracker:
+                    self.state_tracker.set_state("password_revert")
+                return True
+            prior_password = self.password
+            if attempt < attempts:
+                self.logger.warning(
+                    "password restore attempt %s/%s failed; retrying",
+                    attempt,
+                    attempts,
+                )
+                self._reset_login_available_timer()
+                continue
+            return False
+        return False
+
     def _handle_password_change_banner(self):
         if self.password_changed:
             return True
         self.logger.warning("password change banner detected; updating password")
         self._reset_login_available_timer()
         self._extend_state_timeout("bootstrap_done", DEFAULT_PASSWORD_BOOTSTRAP_TIMEOUT)
-        op = self._enter_config_mode()
-        if op is None:
-            self.logger.warning("unable to enter config mode for password change")
-            return False
         if self.new_password == self.password:
             self.logger.warning("new password matches current; skipping password change")
             return False
-        self._send_cmd_wait(
-            f"system aaa authentication users user diag config password {self.new_password}",
-            timeout=60,
-        )
-        if self._state_timed_out():
-            return False
-        self._reset_login_available_timer()
-        self.password = self.new_password
-        self.password_changed = True
-        if not self._exit_to_oper(timeout=10, max_exits=4):
-            self.logger.warning("unable to exit config mode after password change")
-        # Some releases do not reliably present a clean login prompt
-        # immediately after password update. Keep the current session when
-        # possible, and only force a re-login if we cannot confirm a prompt.
-        post_change_output = self._wait_for_prompt(timeout=15, send_newline=True)
-        if not self._login_reached_prompt(post_change_output):
-            if not self._relogin(password=self.password, timeout=60):
-                self.logger.warning("login failed after password change")
+        attempts = 2
+        prior_password = self.password
+        for attempt in range(1, attempts + 1):
+            op = self._enter_config_mode()
+            if op is None:
+                self.logger.warning("unable to enter config mode for password change")
                 return False
-        self._wait_for_non_sim_prompt(timeout=30)
+            if self._apply_password_and_verify(
+                self.new_password,
+                prior_password,
+                "update",
+            ):
+                self.password_changed = True
+                break
+            prior_password = self.password
+            if attempt < attempts:
+                self.logger.warning(
+                    "password update attempt %s/%s failed; retrying",
+                    attempt,
+                    attempts,
+                )
+                self._reset_login_available_timer()
+                continue
+            return False
+        if not self._wait_for_non_sim_prompt(timeout=30):
+            self.logger.warning("non-SIM prompt not observed after password update")
+        if not self._restore_original_password():
+            return False
         return True
 
     def wait_for_bootstrap_done(self):
@@ -980,6 +1085,9 @@ class SAOS(vrnetlab.VR):
         state_timeouts = {
             "login_available": self._read_timeout_env(
                 "SAOS_STATE_TIMEOUT_LOGIN_S", DEFAULT_TIMEOUTS["login_available"]
+            ),
+            "password_revert": self._read_timeout_env(
+                "SAOS_STATE_TIMEOUT_PASSWORD_REVERT_S", DEFAULT_TIMEOUTS["password_revert"]
             ),
             "bootstrap_done": self._read_timeout_env(
                 "SAOS_STATE_TIMEOUT_BOOTSTRAP_S", DEFAULT_TIMEOUTS["bootstrap_done"]
